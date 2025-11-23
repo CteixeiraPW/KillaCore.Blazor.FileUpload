@@ -16,8 +16,10 @@
 		<Configurations>Debug;Release</Configurations>
 		<PackageIcon>icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageProjectUrl>https://accountowner-dpw-lacounty-gov.visualstudio.com/_git/PW-Library</PackageProjectUrl>
+		<PackageProjectUrl></PackageProjectUrl>
 		<PackageTags>Blazor;Upload;File;Concurrency</PackageTags>
+		<RepositoryUrl>https://github.com/CteixeiraPW/KillaCore.Blazor.FileUpload</RepositoryUrl>
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 	</PropertyGroup>
 	<ItemGroup>
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
