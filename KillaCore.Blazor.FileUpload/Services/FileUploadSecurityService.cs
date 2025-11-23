@@ -3,7 +3,7 @@ using System.Text;
 
 namespace KillaCore.Blazor.FileUpload.Services;
 
-public class HmacFileUploadSecurityService : IFileUploadSecurityService
+internal class HmacFileUploadSecurityService : IFileUploadSecurityService
 {
     private readonly byte[] _secretKeyBytes;
     private readonly TimeSpan _tokenLifespan = TimeSpan.FromMinutes(5);

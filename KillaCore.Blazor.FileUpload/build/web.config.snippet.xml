@@ -1,0 +1,5 @@
+﻿<security>
+	<requestFiltering>
+		<requestLimits maxAllowedContentLength="524288000" />
+	</requestFiltering>
+</security>

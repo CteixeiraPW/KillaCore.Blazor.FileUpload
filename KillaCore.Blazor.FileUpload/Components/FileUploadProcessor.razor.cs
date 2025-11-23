@@ -2,6 +2,7 @@
 using KillaCore.Blazor.FileUpload.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Forms;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.JSInterop;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -9,39 +10,30 @@ using System.Threading.Channels;
 
 namespace KillaCore.Blazor.FileUpload.Components;
 
-public partial class FileUploadProcessor : ComponentBase
+public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 {
     // --- 1. INJECTIONS ---
-    [Inject]
-    private IJSRuntime JsRuntime { get; set; } = default!;
-    [Inject]
-    private IFileUploadSecurityService SecurityService { get; set; } = default!;
+    [Inject] private IJSRuntime JsRuntime { get; set; } = default!;
+    [Inject] private IFileUploadSecurityService SecurityService { get; set; } = default!;
+    [Inject] private IFileUploadBridgeService Bridge { get; set; } = default!; // Injected Bridge
+    [Inject] private IDataProtectionProvider DataProtectionProvider { get; set; } = default!; // Injected DP
 
     // --- 2. CONFIGURATION ---
     [Parameter, EditorRequired]
     public FileProcessingOptions Options { get; set; } = new();
 
     [Parameter]
-    public string UserId { get; set; } = "Anonymous"; // Placeholder for user identification
+    public string UserId { get; set; } = "Anonymous";
 
-    // The InputFile ID used by JS to locate the DOM element
     [Parameter, EditorRequired]
     public string InputSelector { get; set; } = default!;
 
     // --- 3. EVENT HOOKS ---
-    // Notification for UI updates (Progress, Status changes)
-    [Parameter]
-    public EventCallback<FileNotificationEvent> OnEvent { get; set; }
+    [Parameter] public EventCallback<FileNotificationEvent> OnEvent { get; set; }
+    [Parameter] public Func<FileTransferData, Task<bool>>? OnVerifyRemoteDuplicate { get; set; }
+    [Parameter] public Func<FileTransferData, Stream, Task>? OnFileUploadCompleted { get; set; }
 
-    // Optional: User hook to validate file against a remote server (return true if duplicate exists)
-    [Parameter]
-    public Func<FileTransferData, Task<bool>>? OnVerifyRemoteDuplicate { get; set; }
-
-    // Optional: User hook to move the file from Temp to Final Storage
-    [Parameter]
-    public Func<FileTransferData, Stream, Task>? OnFileUploadCompleted { get; set; }
-
-    // --- 4. PUBLIC STATE (For UI Rendering) ---
+    // --- 4. PUBLIC STATE ---
     private readonly List<FileTransferData> _transfers = [];
     public IReadOnlyList<FileTransferData> Transfers => _transfers;
 
@@ -53,13 +45,44 @@ public partial class FileUploadProcessor : ComponentBase
     private readonly ConcurrentDictionary<string, string> _localHashCache = new();
     private string _currentBatchId = string.Empty;
 
-    // Used to decouple Upload (Network) from Processing (CPU)
-    private record ProcessingJob(FileTransferData Model, string TempPath);
+    // State for the Policy Token
+    private string _policyToken = string.Empty;
+
+    // CHANGED: Job now holds the ClaimToken, not the Path (Security)
+    private record ProcessingJob(FileTransferData Model, string ClaimToken);
+
+    internal const string DATA_PROTECTION_POLICY = "KillaCore.Blazor.FileUpload.Policy.v1";
+    internal const string POLICY_HEADER_NAME = "X-Upload-Policy";
+    internal const string TOKEN_HEADER_NAME = "X-Upload-Token";
 
     // --- LIFECYCLE ---
     protected override void OnInitialized()
     {
         _dotNetRef = DotNetObjectReference.Create(this);
+    }
+
+    protected override void OnParametersSet()
+    {
+        // 1. Re-create the protector (lightweight operation)
+        var protector = DataProtectionProvider.CreateProtector(DATA_PROTECTION_POLICY);
+
+        // 2. Extract Rules from Options
+        // Logic: If the list is empty, your client-side logic implies "Allow All".
+        // We represent "Allow All" in the token as a wildcard "*".
+        string rulesPayload;
+
+        if (Options.AllowedMimeTypes == null || Options.AllowedMimeTypes.Count == 0)
+        {
+            rulesPayload = "*";
+        }
+        else
+        {
+            // Join into a simple comma-separated string: "image/jpeg,image/png"
+            rulesPayload = string.Join(",", Options.AllowedMimeTypes);
+        }
+
+        // 3. Encrypt (This generates a new token whenever Options change)
+        _policyToken = protector.Protect(rulesPayload);
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -227,7 +250,7 @@ public partial class FileUploadProcessor : ComponentBase
                     // We await this, which throttles the network concurrency to 'MaxConcurrentUploads'
                     if (_jsModule != null)
                     {
-                        var tempPath = await _jsModule.InvokeAsync<string>(
+                        var claimToken = await _jsModule.InvokeAsync<string>(
                             "uploadFile",
                             ct,
                             _dotNetRef,
@@ -235,14 +258,18 @@ public partial class FileUploadProcessor : ComponentBase
                             model.Index,
                             Options.UploadEndpointUrl,
                             _currentBatchId,
-                            uploadToken);
+                            uploadToken,
+                            TOKEN_HEADER_NAME, // Pass Header Name
+                            _policyToken,      // Pass Encrypted Policy
+                            POLICY_HEADER_NAME // Pass Policy Header Name
+                            );
 
                         // 4. Handoff to CPU Consumer
-                        if (!string.IsNullOrEmpty(tempPath))
+                        if (!string.IsNullOrEmpty(claimToken))
                         {
-                            await _cpuChannel!.Writer.WriteAsync(new ProcessingJob(model, tempPath), ct);
+                            // write the CLAIM TOKEN to the channel
+                            await _cpuChannel!.Writer.WriteAsync(new ProcessingJob(model, claimToken), ct);
 
-                            // Visual update only, real work happens in next loop
                             model.Stage = TransferStage.Hashing;
                             model.StatusMessage = "Queued for processing...";
                             await FireEventAsync(EventNotificationType.StageChange, model);
@@ -284,11 +311,19 @@ public partial class FileUploadProcessor : ComponentBase
             await Parallel.ForEachAsync(_cpuChannel.Reader.ReadAllAsync(batchToken), parallelOptions, async (job, token) =>
             {
                 var model = job.Model;
-                var tempPath = job.TempPath;
+                var claimToken = job.ClaimToken;
 
                 // Link tokens again
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, model.IndividualCts.Token);
                 var ct = linkedCts.Token;
+
+                bool hasFile = Bridge.TryClaimFile(claimToken, out string? tempPath);
+
+                if (!hasFile || string.IsNullOrEmpty(tempPath))
+                {
+                    FailModel(model, "Security Error: Unable to claim file from server bridge (Expired or Invalid Token).");
+                    return;
+                }
 
                 try
                 {

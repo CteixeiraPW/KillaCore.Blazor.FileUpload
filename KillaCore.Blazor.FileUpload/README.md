@@ -242,3 +242,22 @@ The `FileUploadProcessor` handles files in two distinct stages to optimize serve
   * .NET 6.0, 7.0, or 8.0+
   * Blazor Server or Blazor Web App (Interactive Server)
   * Note: This library relies on `Microsoft.AspNetCore.Mvc` for the controller implementation.
+
+-----
+## IIS / IIS Express Configuration
+
+If you are hosting on IIS or running locally with IIS Express, you MUST 
+configure the request limits, or uploads > 30MB will fail with Error 413.
+
+Create or Edit your `web.config`:
+
+```xml
+<configuration>
+  <system.webServer>
+    <security>
+      <requestFiltering>
+        <requestLimits maxAllowedContentLength="524288000" />
+      </requestFiltering>
+    </security>
+  </system.webServer>
+</configuration>

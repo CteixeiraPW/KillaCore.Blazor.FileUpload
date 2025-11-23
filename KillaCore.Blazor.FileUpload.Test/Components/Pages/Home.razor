@@ -1,7 +1,295 @@
 ﻿@page "/"
 
-<PageTitle>Home</PageTitle>
+@using KillaCore.Blazor.FileUpload.Components
+@using KillaCore.Blazor.FileUpload.Models
+@using KillaCore.Blazor.FileUpload.Services
 
-<h1>Hello, world!</h1>
+<div class="container py-4">
+    <div class="card shadow-sm">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+            <h5 class="mb-0"><i class="fas fa-cloud-upload-alt me-2"></i> File Upload Processor Test</h5>
+            <span class="badge bg-secondary">Blazor Server</span>
+        </div>
+        <div class="card-body">
 
-Welcome to your new app.
+            <div class="row g-3 mb-4 align-items-end">
+                <div class="col-md-6">
+                    <label class="form-label fw-bold">Select Files (Multiple allowed)</label>
+                    <InputFile id="@_inputId" OnChange="HandleFileSelection" multiple class="form-control"
+                               accept="image/png, image/jpeg, application/pdf, application/vnd.microsoft.portable-executable, .png, .jpg, .jpeg, .pdf, .exe, .dll, .efi" />
+                </div>
+
+                <div class="col-md-6 text-end">
+                    <button class="btn btn-danger" @onclick="CancelAll" disabled="@(!IsProcessing)">
+                        <i class="fas fa-stop-circle me-1"></i> Cancel All
+                    </button>
+                </div>
+
+                <div class="col-12">
+                    <label class="small text-muted mb-1">Global Batch Progress</label>
+                    <div class="progress" style="height: 10px;">
+                        <div class="progress-bar bg-success transition-bar" role="progressbar"
+                             style="width: @(GlobalProgressPercent)%">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <hr />
+
+            <div class="list-group list-group-flush">
+                @if (_processor?.Transfers is null || !_processor.Transfers.Any())
+                {
+                    <div class="text-center text-muted py-5">
+                        <i class="fas fa-inbox fa-3x mb-3"></i>
+                        <p>No files selected. Choose files to begin processing.</p>
+                    </div>
+                }
+                else
+                {
+                    @foreach (var transfer in _processor.Transfers)
+                    {
+                        <div class="list-group-item py-3 @GetRowClass(transfer.Status)">
+                            <div class="row align-items-center">
+
+                                <div class="col-md-4">
+                                    <div class="d-flex align-items-center">
+                                        <div class="me-3 fa-2x text-secondary">
+                                            <i class="@GetFileIcon(transfer.FileName)"></i>
+                                        </div>
+                                        <div>
+                                            <h6 class="mb-0 text-truncate" title="@transfer.FileName">@transfer.FileName</h6>
+                                            <small class="text-muted">@FormatBytes(transfer.FileSize)</small>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-3">
+                                    <div class="d-flex flex-column">
+                                        <span class="badge mb-1 @GetStatusBadgeColor(transfer.Status)">
+                                            @transfer.Status
+                                        </span>
+                                        <small class="text-muted">
+                                            Stage: <strong class="text-primary">@transfer.Stage</strong>
+                                        </small>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-4">
+                                    <div class="d-flex justify-content-between small mb-1">
+                                        <span>@transfer.StatusMessage</span>
+                                        <span>@transfer.StageProgressPercent.ToString("F0")%</span>
+                                    </div>
+                                    <div class="progress" style="height: 6px;">
+                                        <div @key="@transfer.Stage" class="progress-bar @GetProgressBarColor(transfer.Status, transfer.Stage) @(transfer.Status == TransferStatus.Pending ? "" : "progress-bar-striped progress-bar-animated")"
+                                             role="progressbar"
+                                             style="width: @transfer.StageProgressPercent%">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-1 text-end">
+                                    @if (!transfer.IsFinished)
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                title="Cancel this file"
+                                                @onclick="() => CancelSingle(transfer.Id)">
+                                            <i class="fas fa-times"></i>
+                                        </button>
+                                    }
+                                    else if (transfer.Status == TransferStatus.Completed)
+                                    {
+                                        <i class="fas fa-check-circle text-success fa-lg"></i>
+                                    }
+                                    else if (transfer.Status == TransferStatus.Failed)
+                                    {
+                                        <i class="fas fa-exclamation-circle text-danger fa-lg"></i>
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                    }
+                }
+            </div>
+        </div>
+    </div>
+
+    <FileUploadProcessor @ref="_processor"
+                         InputSelector="@($"#{_inputId}")"
+                         Options="@_options"
+                         OnEvent="HandleProcessorEvent"
+                         OnVerifyRemoteDuplicate="SimulateRemoteCheck"
+                         OnFileUploadCompleted="SimulateSaveProcess" />
+</div>
+
+@code {
+    private FileUploadProcessor _processor = default!;
+    private readonly string _inputId = "fileInput-" + Guid.NewGuid().ToString("N");
+
+    // Configuration Options
+    private FileProcessingOptions _options = new()
+    {
+        MaxConcurrentUploads = 5,
+        MaxConcurrentProcessors = 5,
+        MaxFiles = 10,
+        MaxSizeFileBytes = 200 * 1024 * 1024, // 50MB
+        UploadEndpointUrl = "api/uploads/temp", // Your Controller URL
+        AllowedMimeTypes = new List<string> { "image/png", "image/jpeg", "application/pdf", "application/vnd.microsoft.portable-executable", "application/x-msdownload" }, // Testing Policy
+        // Enable features to test the pipeline stages
+        EnabledFeatures = new HashSet<FileUploadFeature>
+        {
+            FileUploadFeature.VerifyLocalDuplicates,
+            FileUploadFeature.VerifyRemoteDuplicates,
+            FileUploadFeature.SaveToServer
+        }
+    };
+
+    // Computed Property for Global Progress UI
+    private double GlobalProgressPercent
+    {
+        get
+        {
+            if (_processor == null || _processor.Transfers.Count == 0) return 0;
+            // Simple logic: Each completed file is 100 points. Active files add their partial points.
+            // Total points possible = Count * 100.
+            double totalPoints = _processor.Transfers.Count * 100;
+            double currentPoints = _processor.Transfers.Sum(t =>
+                t.IsFinished && t.Status == TransferStatus.Completed ? 100 :
+                t.IsFinished ? 0 : // Failed/Cancelled count as 0 progress for the bar usually
+                                   // Rough estimate: Map stage progress to global progress?
+                                   // For simplicity, we just average the stage progress (it's visual only)
+                t.StageProgressPercent
+            );
+            return (currentPoints / totalPoints) * 100;
+        }
+    }
+
+    private bool IsProcessing => _processor?.Transfers.Any(t => !t.IsFinished) ?? false;
+
+    // --- ACTIONS ---
+
+    private async Task HandleFileSelection(InputFileChangeEventArgs e)
+    {
+        // Blazor allows retrieving up to 'MaximumFileCount' files.
+        var files = e.GetMultipleFiles(maximumFileCount: 20);
+        await _processor.ProcessInputFiles(files);
+    }
+
+    private async Task CancelAll()
+    {
+        await _processor.CancelAllAsync();
+    }
+
+    private async Task CancelSingle(string fileId)
+    {
+        await _processor.CancelFile(fileId);
+    }
+
+    // --- EVENT HANDLING ---
+
+    private void HandleProcessorEvent(FileNotificationEvent e)
+    {
+        // The processor calls this whenever something interesting happens.
+        // We just need to trigger a re-render.
+        StateHasChanged();
+    }
+
+    // --- SIMULATIONS (MOCKING BACKEND LOGIC) ---
+    // These replace your real DB calls so you can test the UI flow immediately.
+
+    private async Task<bool> SimulateRemoteCheck(FileTransferData data)
+    {
+        // Simulate network latency (200ms to 800ms)
+        await Task.Delay(Random.Shared.Next(200, 800));
+
+        // Randomly simulate a duplicate file (10% chance)
+        bool isDuplicate = Random.Shared.Next(1, 100) > 90;
+        return isDuplicate;
+    }
+
+    private async Task SimulateSaveProcess(FileTransferData data, Stream stream)
+    {
+        // Simulate saving to Azure Blob / Disk
+        // We MUST read the stream to trigger the progress bar updates
+        var buffer = new byte[8192];
+        int bytesRead;
+        while ((bytesRead = await stream.ReadAsync(buffer)) > 0)
+        {
+            // Simulate slow disk I/O
+            await Task.Delay(5);
+        }
+    }
+
+    // --- UI HELPERS ---
+
+    private string GetRowClass(TransferStatus status) => status switch
+    {
+        TransferStatus.Failed => "bg-light-danger",
+        TransferStatus.Cancelled => "opacity-75",
+        _ => ""
+    };
+
+    private string GetStatusBadgeColor(TransferStatus status) => status switch
+    {
+        TransferStatus.Pending => "bg-secondary",
+        TransferStatus.InProgress => "bg-info text-dark",
+        TransferStatus.Completed => "bg-success",
+        TransferStatus.Failed => "bg-danger",
+        TransferStatus.Cancelled => "bg-warning text-dark",
+        TransferStatus.Skipped => "bg-warning text-dark",
+        _ => "bg-secondary"
+    };
+
+    private string GetProgressBarColor(TransferStatus status, TransferStage stage)
+    {
+        if (status == TransferStatus.Failed) return "bg-danger";
+
+        return stage switch
+        {
+            TransferStage.Uploading => "bg-primary", // Blue
+            TransferStage.Hashing => "bg-info", // Cyan
+            TransferStage.VerifyingLocalDuplicates => "bg-warning", // Yellow
+            TransferStage.VerifyingRemoteDuplicates => "bg-warning",
+            TransferStage.ServerSaving => "bg-success", // Green
+            _ => "bg-primary"
+        };
+    }
+
+    private string GetFileIcon(string fileName)
+    {
+        var ext = Path.GetExtension(fileName).ToLower();
+        return ext switch
+        {
+            ".pdf" => "fas fa-file-pdf text-danger",
+            ".jpg" or ".jpeg" or ".png" or ".gif" => "fas fa-file-image text-primary",
+            ".zip" or ".rar" => "fas fa-file-archive text-warning",
+            ".txt" => "fas fa-file-alt text-secondary",
+            ".doc" or ".docx" => "fas fa-file-word text-primary",
+            ".xls" or ".xlsx" => "fas fa-file-excel text-success",
+            _ => "fas fa-file"
+        };
+    }
+
+    private string FormatBytes(long bytes)
+    {
+        string[] suffix = { "B", "KB", "MB", "GB", "TB" };
+        int i;
+        double dblSByte = bytes;
+        for (i = 0; i < suffix.Length && bytes >= 1024; i++, bytes /= 1024)
+        {
+            dblSByte = bytes / 1024.0;
+        }
+        return string.Format("{0:0.##} {1}", dblSByte, suffix[i]);
+    }
+}
+
+<style>
+    /* CSS for smoother progress bars */
+    .transition-bar {
+        transition: width 0.3s ease;
+    }
+
+    .bg-light-danger {
+        background-color: #fff5f5;
+    }
+</style>
