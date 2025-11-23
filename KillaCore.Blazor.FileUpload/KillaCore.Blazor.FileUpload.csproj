@@ -1,18 +1,16 @@
-<Project Sdk="Microsoft.NET.Sdk.Razor">
+﻿<Project Sdk="Microsoft.NET.Sdk.Razor">
 	<PropertyGroup>
 		<TargetFramework>net8.0</TargetFramework>
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<PackageId>KillaCore.Blazor.FileUpload</PackageId>
 		<AddRazorSupportForMvc>true</AddRazorSupportForMvc>
-		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+		<GeneratePackageOnBuild>false</GeneratePackageOnBuild>
 		<Title>Blazor Server FileUpload</Title>
 		<Description>A standardized, concurrency-managed file uploader for Blazor.</Description>
 		<Authors>Carlos Teixeira</Authors>
 		<Company>KillaCore</Company>
-		<Version>1.0.0-beta.2</Version>
-		<IncludeSymbols>true</IncludeSymbols>
-		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+		<Version>1.0.0-beta.3</Version>
 		<Configurations>Debug;Release</Configurations>
 		<PackageIcon>icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
@@ -21,6 +19,13 @@
 		<RepositoryUrl>https://github.com/CteixeiraPW/KillaCore.Blazor.FileUpload</RepositoryUrl>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)'=='Release'">
+		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+		<IncludeSymbols>true</IncludeSymbols>
+		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+	</PropertyGroup>
+	
 	<ItemGroup>
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
 	</ItemGroup>
@@ -28,4 +33,19 @@
 		<None Include="icon.png" Pack="true" PackagePath="\" />
 		<None Include="README.md" Pack="true" PackagePath="\" />
 	</ItemGroup>
+
+	<Target Name="PublishNugetPackage" AfterTargets="Pack" Condition="'$(Configuration)'=='Release'">
+		<PropertyGroup>
+			<NuGetApiKey>$(NUGET_API_KEY)</NuGetApiKey>
+			<NuGetSource>https://api.nuget.org/v3/index.json</NuGetSource>
+
+			<PackageFile>$(BaseOutputPath)$(Configuration)\$(PackageId).$(PackageVersion).nupkg</PackageFile>
+		</PropertyGroup>
+
+		<Message Text="--- Pushing NuGet Package: $(PackageFile) ---" Importance="high" />
+
+		<Exec Command="dotnet nuget push &quot;$(PackageFile)&quot; --source &quot;$(NuGetSource)&quot; --api-key &quot;$(NuGetApiKey)&quot; --skip-duplicate" />
+	</Target>
+	
+	
 </Project>
