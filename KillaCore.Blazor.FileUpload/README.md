@@ -1,7 +1,3 @@
-﻿Here is a comprehensive, professional `README.md` file formatted for your project. It documents the architecture, installation, usage, and configuration options based on the code you provided.
-
-I have structured it to reflect the "best practices" approach you utilized in the code (Clean Architecture, Separation of Concerns, and Producer-Consumer pipelines).
-
 -----
 
 # KillaCore.Blazor.FileUpload
