@@ -10,7 +10,7 @@
 		<Description>A standardized, concurrency-managed file uploader for Blazor.</Description>
 		<Authors>Carlos Teixeira</Authors>
 		<Company>KillaCore</Company>
-		<Version>1.0.0-beta.1</Version>
+		<Version>1.0.0-beta.2</Version>
 		<IncludeSymbols>true</IncludeSymbols>
 		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
 		<Configurations>Debug;Release</Configurations>

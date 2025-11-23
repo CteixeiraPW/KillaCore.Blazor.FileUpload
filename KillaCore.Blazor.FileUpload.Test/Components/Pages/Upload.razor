@@ -1,0 +1,114 @@
+﻿@page "/upload"
+@using Blazor.FileUpload.Models
+
+<h3>Secure File Uploader</h3>
+
+<InputFile id="fileInput" OnChange="HandleFileSelection" multiple />
+
+<button class="btn btn-primary" @onclick="StartUpload" disabled="@(!_filesSelected)">
+    Upload Files
+</button>
+
+<button class="btn btn-danger" @onclick="CancelUpload">
+    Cancel All
+</button>
+
+<FileUploadProcessor @ref="_uploader"
+                     InputSelector="#fileInput"
+                     Options="_options"
+                     OnEvent="HandleUploadEvent"
+                     OnFileUploadCompleted="SaveFileToDisk"
+                     OnVerifyRemoteDuplicate="CheckRemoteDuplicate" />
+
+@foreach (var transfer in _uploader?.Transfers ?? Enumerable.Empty<FileTransferData>())
+{
+    <div class="upload-item">
+        <span>@transfer.FileName</span>
+        <div class="progress">
+            <div class="progress-bar" style="width: @(transfer.LifecyclePercent)%">
+                @transfer.StatusMessage (@transfer.LifecyclePercent.ToString("F0")%)
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private FileUploadProcessor? _uploader;
+    private FileProcessingOptions _options = new FileProcessingOptions
+    {
+        // Endpoints
+        UploadEndpointUrl = "api/uploads/temp",
+
+        // Limits
+        MaxFiles = 50,
+        MaxSizeFileBytes = 1024 * 1024 * 100, // 100 MB
+
+        // Concurrency Tuning
+        MaxConcurrentUploads = 5,    // Network bound
+        MaxConcurrentProcessors = 2, // CPU bound (Hashing/Saving)
+
+        // UI Throttling
+        UIProgressUpdateIntervalMs = 300,
+
+        // Feature Toggles
+        EnabledFeatures = new HashSet<FileUploadFeature>
+        {
+            FileUploadFeature.VerifyLocalDuplicates, // Hash check within batch
+            FileUploadFeature.VerifyRemoteDuplicates, // Check against server
+            FileUploadFeature.SaveToServer // Move from Temp -> Final
+        },
+
+        // Allowed Types
+        AllowedMimeTypes = new List<string> { "image/png", "image/jpeg", "application/pdf" }
+    };
+    private bool _filesSelected = false;
+    private List<IBrowserFile> capturedFiles = [];
+
+    private void HandleFileSelection(InputFileChangeEventArgs e)
+    {
+        _filesSelected = true;
+        capturedFiles = e.GetMultipleFiles().ToList();
+    }
+
+    private async Task StartUpload()
+    {
+        if (_uploader != null)
+            await _uploader.ProcessInputFiles(capturedFiles);
+    }
+
+    private async Task CancelUpload()
+    {
+        if (_uploader != null) await _uploader.CancelAllAsync();
+    }
+
+    private void HandleUploadEvent(FileNotificationEvent e)
+    {
+        // Force UI refresh on progress or status change
+        StateHasChanged();
+
+        if(e.Type == EventNotificationType.BatchCompleted)
+        {
+            
+        }
+    }
+
+    // Optional: Callback to save the file after validation/upload
+    private async Task SaveFileToDisk(FileTransferData data, Stream stream)
+    {
+        //let emulate the reading of the stream and add a small delay
+        byte[] buffer = new byte[81920];
+        while (await stream.ReadAsync(buffer, 0, buffer.Length) > 0)
+        {
+            // Simulate processing
+            await Task.Delay(10);
+        }
+    }
+
+    // Optional: Callback to check if file exists on server
+    private async Task<bool> CheckRemoteDuplicate(FileTransferData data)
+    {
+        // Check database or file system using data.DetectedHash
+        await Task.Delay(100); // Simulation
+        return false;
+    }
+}

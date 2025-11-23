@@ -70,7 +70,7 @@ public partial class FileUploadProcessor : ComponentBase
             {
                 // Lazy load the JS Module
                 _jsModule = await JsRuntime.InvokeAsync<IJSObjectReference>(
-                    "import", "./_content/Balzor.FileUpload/fileUploadWorker.js");
+                    "import", "./_content/KillaCore.Blazor.FileUpload/js/fileUploadWorker.js");
             }
             catch (Exception ex)
             {
