@@ -3,7 +3,7 @@
 public sealed class FileProcessingOptions
 {
     // --- Endpoints ---
-    public string UploadEndpointUrl { get; set; } = "api/upload";
+    public string UploadEndpointUrl { get; set; } = "api/uploads/temp";
 
     // ✅ SAFE: The user can ONLY add valid features here.
     // They cannot add "Uploading" or "Hashing" because the enum doesn't have them.
