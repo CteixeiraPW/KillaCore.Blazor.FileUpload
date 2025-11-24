@@ -1,14 +1,15 @@
 ﻿namespace KillaCore.Blazor.FileUpload.Models;
 
-public sealed class FileTransferData(string fileName, long fileSize, string mimeType, TransferProgressWeights weights) : IDisposable
+public sealed class FileTransferData : IDisposable
 {
     // --- Standard Properties ---
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public int Index { get; set; }
     public string BatchId { get; set; } = string.Empty;
-    public string FileName { get; } = fileName;
-    public long FileSize { get; } = fileSize;
-    public string MimeType { get; } = mimeType;
+    public string FileName { get; set; } = string.Empty;
+    public long FileSize { get; set; } = 0;
+    public string MimeType { get; set; } = string.Empty;
+    public TransferProgressWeights Weights { get; set; } = new();
 
     // --- State ---
     public TransferStage Stage { get; set; } = TransferStage.Pending;
@@ -28,6 +29,19 @@ public sealed class FileTransferData(string fileName, long fileSize, string mime
     public DateTime StartTime { get; set; } // [NEW] Good for calculating speed
     public DateTime? EndTime { get; set; }  // [NEW] Good for analytics
     public CancellationTokenSource IndividualCts { get; set; } = new();
+
+    // --- Construstors & Init ---
+    public FileTransferData()
+    {
+    }
+
+    public FileTransferData(string fileName, long fileSize, string mimeType, TransferProgressWeights weights)
+    {
+        FileName = fileName;
+        FileSize = fileSize;
+        MimeType = mimeType;
+        Weights = weights;
+    }
 
     public bool IsFinished => Status is TransferStatus.Completed or TransferStatus.Failed or TransferStatus.Cancelled or TransferStatus.Skipped;
 
