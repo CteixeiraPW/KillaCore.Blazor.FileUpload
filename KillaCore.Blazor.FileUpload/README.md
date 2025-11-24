@@ -174,9 +174,9 @@ Here is a complete example of a Blazor page that handles multiple file uploads, 
     }
 
     // Callback: Fires when the entire batch is finished
-    private Task HandleBatchCompleted((IReadOnlyList<FileTransferData> Files, string BatchId) result)
+    private Task HandleBatchCompleted(IReadOnlyList<FileTransferData> files, string batchId)
     {
-        Console.WriteLine($"Batch {result.BatchId} finished. Processed {result.Files.Count} files.");
+        Console.WriteLine($"Batch {batchId} finished. Processed {files.Count} files.");
         return Task.CompletedTask;
     }
 }

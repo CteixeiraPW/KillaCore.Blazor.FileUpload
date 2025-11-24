@@ -32,7 +32,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     [Parameter] public EventCallback<FileNotificationEvent> OnEvent { get; set; }
     [Parameter] public Func<FileTransferData, CancellationToken, Task<bool>>? OnVerifyRemoteDuplicate { get; set; }
     [Parameter] public Func<FileTransferData, Stream, CancellationToken, Task>? OnFileServerUpload { get; set; }
-    [Parameter] public Func<(IReadOnlyList<FileTransferData> FilesTransferData, string BatchId), Task>? OnFilesUploadCompleted { get; set; }
+    [Parameter] public Func<IReadOnlyList<FileTransferData>, string, Task>? OnFilesUploadCompleted { get; set; }
 
     // --- 4. PUBLIC STATE ---
     private readonly List<FileTransferData> _transfers = [];
@@ -143,6 +143,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
             if (file.Size > Options.MaxSizeFileBytes)
             {
                 model.Status = TransferStatus.Skipped;
+                model.StartTime = DateTime.UtcNow;
+                model.EndTime = DateTime.UtcNow;
                 model.StatusMessage = "File too large";
                 await FireEventAsync(EventNotificationType.FileSkipped, model, "Size limit exceeded");
                 continue;
@@ -151,6 +153,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
             if (Options.AllowedMimeTypes.Count != 0 && !Options.AllowedMimeTypes.Contains(file.ContentType))
             {
                 model.Status = TransferStatus.Skipped;
+                model.StartTime = DateTime.UtcNow;
+                model.EndTime = DateTime.UtcNow;
                 model.StatusMessage = "Invalid type";
                 await FireEventAsync(EventNotificationType.FileSkipped, model, "MimeType not allowed");
                 continue;
@@ -160,6 +164,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
             if (acceptedCount >= Options.MaxFiles)
             {
                 model.Status = TransferStatus.Skipped;
+                model.StartTime = DateTime.UtcNow;
+                model.EndTime = DateTime.UtcNow;
                 model.StatusMessage = "Limit exceeded";
                 await FireEventAsync(EventNotificationType.FileSkipped, model, "Max files reached");
                 continue;
@@ -199,6 +205,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         {
             model.IndividualCts.Cancel();
             model.Status = TransferStatus.Cancelled;
+            model.EndTime = DateTime.UtcNow;
             model.StatusMessage = "Cancelled";
             await FireEventAsync(EventNotificationType.FileCancelled, model);
         }
@@ -286,6 +293,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 }
                 catch (OperationCanceledException) {
                     model.Status = TransferStatus.Cancelled;
+                    model.EndTime = DateTime.UtcNow;
                     model.StatusMessage = "Cancelled";
                 }
                 catch (Exception ex)
@@ -354,6 +362,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                         if (!_localHashCache.TryAdd(model.DetectedHash, model.FileName))
                         {
                             model.Status = TransferStatus.Skipped;
+                            model.EndTime = DateTime.UtcNow;
                             model.StatusMessage = "Duplicate in batch";
                             await FireEventAsync(EventNotificationType.FileSkipped, model);
                             return; // Skip saving
@@ -370,6 +379,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                         if (exists)
                         {
                             model.Status = TransferStatus.Skipped;
+                            model.EndTime = DateTime.UtcNow;
                             model.StatusMessage = "Already exists";
                             await FireEventAsync(EventNotificationType.FileSkipped, model);
                             return;
@@ -418,7 +428,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
             {
                 // We pass the current list of transfers and the batch ID
                 // Since this is the finally block, the list is now stable/complete.
-                await OnFilesUploadCompleted((_transfers, _currentBatchId));
+                await OnFilesUploadCompleted(_transfers, _currentBatchId);
             }
         }
     }

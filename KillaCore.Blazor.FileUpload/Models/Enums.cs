@@ -33,10 +33,7 @@ public enum TransferStage
 
     VerifyingRemoteDuplicates,   // Checking against the Server DB/API
 
-    ServerSaving,                      // Moving temp file to final storage
-
-    // Terminal Stages (Optional, but helps if you want Stage to track end state too)
-    // Completed, Failed, Cancelled 
+    ServerSaving                // Moving temp file to final storage
 }
 
 // This enum ONLY contains the optional features the user can toggle.
