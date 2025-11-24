@@ -188,7 +188,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         _cpuChannel = Channel.CreateUnbounded<ProcessingJob>();
 
         // Fire and forget the background loops (they are managed by _batchCts)
-        _ = RunNetworkProducerAsync(_batchCts.Token);
+        _ = RunNetworkProducerAsync(_batchCts!.Token);
         _ = RunCpuConsumerAsync(_batchCts.Token);
     }
 
