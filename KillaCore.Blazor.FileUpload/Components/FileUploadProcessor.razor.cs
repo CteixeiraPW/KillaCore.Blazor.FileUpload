@@ -427,15 +427,19 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         catch (OperationCanceledException) { /* Batch Cancelled */ }
         finally
         {
-            // 1. Fire the generic event (existing code)
+            // 1. Fire the generic event (as before)
             await FireEventAsync(EventNotificationType.BatchCompleted);
 
-            // 2. Fire your new specific completion hook
-            if (OnFilesUploadCompleted != null)
+            // 2. SAFETY CHECK: Only fire the specific hook if we are NOT cancelling/disposing
+            // If batchToken.IsCancellationRequested is true, it means DisposeAsync() was called,
+            // so the list is likely empty and the component is dead.
+            if (OnFilesUploadCompleted != null && !batchToken.IsCancellationRequested)
             {
-                // We pass the current list of transfers and the batch ID
-                // Since this is the finally block, the list is now stable/complete.
-                await OnFilesUploadCompleted(_transfers, _currentBatchId);
+                try
+                {
+                    await OnFilesUploadCompleted(_transfers, _currentBatchId);
+                }
+                catch { }
             }
         }
     }
