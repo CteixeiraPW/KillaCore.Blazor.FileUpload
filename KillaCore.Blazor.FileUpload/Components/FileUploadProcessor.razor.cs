@@ -30,8 +30,9 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
     // --- 3. EVENT HOOKS ---
     [Parameter] public EventCallback<FileNotificationEvent> OnEvent { get; set; }
-    [Parameter] public Func<FileTransferData, Task<bool>>? OnVerifyRemoteDuplicate { get; set; }
-    [Parameter] public Func<FileTransferData, Stream, Task>? OnFileUploadCompleted { get; set; }
+    [Parameter] public Func<FileTransferData, CancellationToken, Task<bool>>? OnVerifyRemoteDuplicate { get; set; }
+    [Parameter] public Func<FileTransferData, Stream, CancellationToken, Task>? OnFileServerUpload { get; set; }
+    [Parameter] public Func<(IReadOnlyList<FileTransferData> FilesTransferData, string BatchId), Task>? OnFilesUploadCompleted { get; set; }
 
     // --- 4. PUBLIC STATE ---
     private readonly List<FileTransferData> _transfers = [];
@@ -109,6 +110,13 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         // 1. Reset State
         _batchCts?.Cancel();
         _batchCts = new CancellationTokenSource();
+
+        //clean old items
+        foreach (var transfer in _transfers)
+        {
+            transfer.Dispose();
+        }
+
         _transfers.Clear();
         _localHashCache.Clear();
         _currentBatchId = Guid.NewGuid().ToString();
@@ -285,6 +293,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                     FailModel(model, $"Upload error: {ex.Message}");
                 }
             });
+
+
         }
         catch (OperationCanceledException) { /* Batch Cancelled */ }
         finally
@@ -356,7 +366,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                         OnVerifyRemoteDuplicate != null)
                     {
                         UpdateStage(model, TransferStage.VerifyingRemoteDuplicates, "Checking server...");
-                        bool exists = await OnVerifyRemoteDuplicate(model);
+                        bool exists = await OnVerifyRemoteDuplicate(model, ct);
                         if (exists)
                         {
                             model.Status = TransferStatus.Skipped;
@@ -367,13 +377,13 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                     }
 
                     // D. Saving (User Callback)
-                    if (Options.EnabledFeatures.Contains(FileUploadFeature.SaveToServer) && OnFileUploadCompleted != null)
+                    if (Options.EnabledFeatures.Contains(FileUploadFeature.SaveToServer) && OnFileServerUpload != null)
                     {
                         UpdateStage(model, TransferStage.ServerSaving, "Saving...");
 
                         await using var fs = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read);
                         var savingProgress = new ProgressStream(fs, read => UpdateThrottledProgress(model, read, model.FileSize));
-                        await OnFileUploadCompleted(model, savingProgress);
+                        await OnFileServerUpload(model, savingProgress, ct);
                     }
 
                     // Success!
@@ -400,7 +410,16 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         catch (OperationCanceledException) { /* Batch Cancelled */ }
         finally
         {
+            // 1. Fire the generic event (existing code)
             await FireEventAsync(EventNotificationType.BatchCompleted);
+
+            // 2. Fire your new specific completion hook
+            if (OnFilesUploadCompleted != null)
+            {
+                // We pass the current list of transfers and the batch ID
+                // Since this is the finally block, the list is now stable/complete.
+                await OnFilesUploadCompleted((_transfers, _currentBatchId));
+            }
         }
     }
 
@@ -482,11 +501,17 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _batchCts?.Cancel();
+        foreach (var transfer in _transfers)
+        {
+            transfer.Dispose();
+        }
+        _transfers.Clear();
         _dotNetRef?.Dispose();
         if (_jsModule != null)
         {
             try { await _jsModule.DisposeAsync(); } catch { }
         }
+        _batchCts?.Dispose();
         GC.SuppressFinalize(this);
     }
 }

@@ -1,6 +1,6 @@
 ﻿namespace KillaCore.Blazor.FileUpload.Models;
 
-public sealed class FileTransferData(string fileName, long fileSize, string mimeType, TransferProgressWeights weights)
+public sealed class FileTransferData(string fileName, long fileSize, string mimeType, TransferProgressWeights weights) : IDisposable
 {
     // --- Standard Properties ---
     public string Id { get; set; } = Guid.NewGuid().ToString();
@@ -82,6 +82,16 @@ public sealed class FileTransferData(string fileName, long fileSize, string mime
             // We just return the total accumulated so far.
             return Math.Min(total, 100);
         }
+    }
+
+    public void Dispose()
+    {
+        // Check for null just in case, though it's initialized inline above
+        IndividualCts?.Dispose();
+
+        // Suppress finalization (good practice, though strictly not needed 
+        // unless you have a finalizer, which you don't need here)
+        GC.SuppressFinalize(this);
     }
 }
 
