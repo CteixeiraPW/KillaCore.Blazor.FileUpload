@@ -61,31 +61,31 @@ public sealed class FileTransferData : IDisposable
             // If we passed uploading, we add the FULL UploadWeight.
             if (Stage == TransferStage.Uploading)
             {
-                return weights.UploadWeight * StageProgressPercent;
+                return Weights.UploadWeight * StageProgressPercent;
             }
-            total += weights.UploadWeight * 100;
+            total += Weights.UploadWeight * 100;
 
             // 2. HASHING (Optional)
-            if (weights.HashWeight > 0)
+            if (Weights.HashWeight > 0)
             {
                 if (Stage == TransferStage.Hashing)
                 {
-                    return total + (weights.HashWeight * StageProgressPercent);
+                    return total + (Weights.HashWeight * StageProgressPercent);
                 }
                 // If we are past hashing (Verifying or Saving), add full Hash weight
                 // Note: We check if stage > Hashing to avoid adding it prematurely
                 if (Stage > TransferStage.Hashing)
                 {
-                    total += weights.HashWeight * 100;
+                    total += Weights.HashWeight * 100;
                 }
             }
 
             // 3. SAVING (Optional)
-            if (weights.SaveWeight > 0)
+            if (Weights.SaveWeight > 0)
             {
                 if (Stage == TransferStage.ServerSaving)
                 {
-                    return total + (weights.SaveWeight * StageProgressPercent);
+                    return total + (Weights.SaveWeight * StageProgressPercent);
                 }
                 // If completed, loop top catches it. If skipped, it won't be here.
             }

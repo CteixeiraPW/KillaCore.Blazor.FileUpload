@@ -74,7 +74,34 @@ export function uploadFile(
                 }
             } else {
                 // Handle other HTTP errors
-                reject(`Upload failed. Status: ${xhr.status}`);
+                let errorMessage = `Upload failed (Status ${xhr.status})`;
+
+                if (xhr.responseText) {
+                    // Try to parse as JSON (for ProblemDetails or API errors)
+                    try {
+                        const errorJson = JSON.parse(xhr.responseText);
+
+                        // Look for standard ProblemDetails fields or custom messages
+                        if (errorJson.detail) {
+                            errorMessage = errorJson.detail;
+                        } else if (errorJson.title) {
+                            errorMessage = errorJson.title;
+                        } else if (errorJson.message) {
+                            errorMessage = errorJson.message;
+                        } else {
+                            // If it's just a raw JSON object, take a snippet
+                            errorMessage += `: ${JSON.stringify(errorJson).substring(0, 200)}`;
+                        }
+                    } catch (e) {
+                        // If not JSON, it's likely a plain text error from BadRequest("String")
+                        // Clean up the text (remove quotes if API returns string literal)
+                        const cleanText = xhr.responseText.replace(/^"|"$/g, '');
+                        if (cleanText.length > 0) {
+                            errorMessage = cleanText;
+                        }
+                    }
+                }
+                reject(errorMessage);
             }
         };
 
