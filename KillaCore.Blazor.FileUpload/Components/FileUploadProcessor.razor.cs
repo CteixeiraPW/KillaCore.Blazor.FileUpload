@@ -104,11 +104,10 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     }
 
     // --- PUBLIC ACTIONS ---
-
-    public async Task ProcessInputFiles(IReadOnlyList<IBrowserFile> browserFiles)
+    public void Clear()
     {
-        // 1. Reset State
-        _batchCts?.Cancel();
+        if (_batchCts != null && !_batchCts.IsCancellationRequested)
+            _batchCts?.Cancel();
         _batchCts = new CancellationTokenSource();
 
         //clean old items
@@ -120,6 +119,13 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         _transfers.Clear();
         _localHashCache.Clear();
         _currentBatchId = Guid.NewGuid().ToString();
+    }
+
+
+    public async Task ProcessInputFiles(IReadOnlyList<IBrowserFile> browserFiles)
+    {
+        // 1. Reset State
+        Clear();
 
         // 2. Calculate Weights based on Options (for accurate progress bars)
         var weights = FileTransferDataHelpers.CalculateWeights(Options);
@@ -188,7 +194,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
     public async Task CancelAllAsync()
     {
-        _batchCts?.Cancel();
+        if (_batchCts != null && !_batchCts.IsCancellationRequested)
+            _batchCts?.Cancel();
 
         foreach (var t in _transfers.Where(x => !x.IsFinished))
         {
@@ -203,7 +210,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         var model = _transfers.FirstOrDefault(x => x.Id == fileId);
         if (model != null && !model.IsFinished)
         {
-            model.IndividualCts.Cancel();
+            if (model.IndividualCts != null && !model.IndividualCts.IsCancellationRequested)
+                model.IndividualCts.Cancel();
             model.Status = TransferStatus.Cancelled;
             model.EndTime = DateTime.UtcNow;
             model.StatusMessage = "Cancelled";
@@ -291,7 +299,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                         }
                     }
                 }
-                catch (OperationCanceledException) {
+                catch (OperationCanceledException)
+                {
                     model.Status = TransferStatus.Cancelled;
                     model.EndTime = DateTime.UtcNow;
                     model.StatusMessage = "Cancelled";
@@ -301,8 +310,6 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                     FailModel(model, $"Upload error: {ex.Message}");
                 }
             });
-
-
         }
         catch (OperationCanceledException) { /* Batch Cancelled */ }
         finally
@@ -510,7 +517,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        _batchCts?.Cancel();
+        if (_batchCts != null && !_batchCts.IsCancellationRequested)
+            _batchCts?.Cancel();
         foreach (var transfer in _transfers)
         {
             transfer.Dispose();
