@@ -120,9 +120,9 @@ internal static class FileTransferDataHelpers
         bool isSavingActive = options.EnabledFeatures.Contains(FileUploadFeature.SaveToServer);
 
         // 2. Assign "Effort Points" (Relative difficulty)
-        double uploadPoints = 6.0;
-        double hashPoints = isHashingActive ? 3.0 : 0;
-        double savePoints = isSavingActive ? 1.0 : 0;
+        double uploadPoints = options.Weights.UploadWeight;
+        double hashPoints = isHashingActive ? options.Weights.HashWeight : 0;
+        double savePoints = isSavingActive ? options.Weights.SaveWeight : 0;
 
         double totalPoints = uploadPoints + hashPoints + savePoints;
 
