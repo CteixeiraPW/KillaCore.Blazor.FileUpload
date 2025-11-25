@@ -50,7 +50,44 @@ public sealed class FileTransferData : IDisposable
     {
         get
         {
+            //These are the easy cases first
             if (Status == TransferStatus.Completed) return 100;
+            if (Status == TransferStatus.Skipped) return 100;
+
+            // Handle Cancelled/Failed with partial progress
+            if (Status == TransferStatus.Cancelled || Status == TransferStatus.Failed)
+            {    
+                double progressUp = 0;
+                // Accumulate full weights for completed stages
+                if (Stage > TransferStage.Uploading)
+                {
+                    progressUp += Weights.UploadWeight * 100;
+                }
+                if (Stage > TransferStage.Hashing)
+                {
+                    progressUp += Weights.HashWeight * 100;
+                }
+                if (Stage > TransferStage.ServerSaving)
+                {
+                    progressUp += Weights.SaveWeight * 100;
+                }
+                
+                // Add partial weight for the current stage
+                if (Stage == TransferStage.Uploading)
+                {
+                    progressUp += Weights.UploadWeight * StageProgressPercent;
+                }
+                else if (Stage == TransferStage.Hashing)
+                {
+                    progressUp += Weights.HashWeight * StageProgressPercent;
+                }
+                else if (Stage == TransferStage.ServerSaving)
+                {
+                    progressUp += Weights.SaveWeight * StageProgressPercent;
+                }
+                return Math.Min(progressUp, 100);
+            }
+
             if (Stage == TransferStage.Pending) return 0;
 
             // Base accumulator
