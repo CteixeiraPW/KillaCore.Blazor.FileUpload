@@ -106,8 +106,8 @@ public sealed class UploadsController(
 
         // --- STEP 4: SAVE TO DISK (Standard Logic) ---
         // (Same as previous code...)
+        var tempRoot = Path.Combine(Path.GetTempPath(), "KillaCoreUploads");
 
-        var tempRoot = Path.Combine(env.ContentRootPath, "App_Data", "temp-uploads");
         Directory.CreateDirectory(tempRoot);
         var tempId = $"{Guid.NewGuid():N}.tmp";
         var tempPath = Path.Combine(tempRoot, tempId);
