@@ -1,4 +1,5 @@
-﻿using KillaCore.Blazor.FileUpload.Models;
+﻿using HeyRed.Mime;
+using KillaCore.Blazor.FileUpload.Models;
 using KillaCore.Blazor.FileUpload.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Forms;
@@ -135,8 +136,11 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
         foreach (var file in browserFiles)
         {
+
+            string effectiveContentType = GetEffectiveContentType(file);
+
             // Create Model
-            var model = new FileTransferData(file.Name, file.Size, file.ContentType, weights)
+            var model = new FileTransferData(file.Name, file.Size, effectiveContentType, weights)
             {
                 Index = acceptedCount, // Tracks index in the browserFileList
                 BatchId = _currentBatchId,
@@ -156,13 +160,13 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 continue;
             }
 
-            if (Options.AllowedMimeTypes.Count != 0 && !Options.AllowedMimeTypes.Contains(file.ContentType))
+            if (Options.AllowedMimeTypes.Count != 0 && !Options.AllowedMimeTypes.Contains(effectiveContentType))
             {
                 model.Status = TransferStatus.Skipped;
                 model.StartTime = DateTime.UtcNow;
                 model.EndTime = DateTime.UtcNow;
                 model.StatusMessage = "Invalid type";
-                await FireEventAsync(EventNotificationType.FileSkipped, model, "MimeType not allowed");
+                await FireEventAsync(EventNotificationType.FileSkipped, model, $"MimeType '{effectiveContentType}' not allowed");
                 continue;
             }
 
@@ -535,5 +539,31 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         }
         _batchCts?.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private static string GetEffectiveContentType(IBrowserFile file)
+    {
+        // 1. If the browser gave us a specific type, trust it (unless it's generic octet-stream)
+        if (!string.IsNullOrWhiteSpace(file.ContentType)
+            && file.ContentType != "application/octet-stream")
+        {
+            return file.ContentType;
+        }
+
+        // 2. Fallback: Infer from extension using MimeTypesMap
+        try
+        {
+            // Path.GetExtension includes the dot (e.g., ".md"), which MimeTypesMap requires.
+            string extension = Path.GetExtension(file.Name);
+
+            // This will return the correct mime (e.g. "text/markdown")
+            return MimeTypesMap.GetMimeType(extension);
+        }
+        catch
+        {
+            // GetMimeType throws if the extension is not found or empty.
+            // We default to binary stream in that case.
+            return "application/octet-stream";
+        }
     }
 }

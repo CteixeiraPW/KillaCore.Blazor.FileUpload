@@ -1,23 +1,27 @@
 ﻿using FileSignatures;
+using HeyRed.Mime;
 using KillaCore.Blazor.FileUpload.Services; // Namespace for your Security Service
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+
 
 namespace KillaCore.Blazor.FileUpload.Controllers;
 
 [ApiController]
 [Route("api/uploads")]
 public sealed class UploadsController(
-    IWebHostEnvironment env,
     IFileUploadSecurityService securityService, // 1. Inject Security
     IFileUploadBridgeService bridge,         // 2. Inject the Bridge
     IFileFormatInspector inspector,    // 3. Inject the Magic Number Inspector
     IDataProtectionProvider dpProvider // 4. Data Protection Provider
     ) : ControllerBase
 {
+
+    // List of extensions that do not have "Magic Numbers" and must be validated by content
+    private static readonly HashSet<string> _textExtensions = [".txt", ".md", ".markdown", ".json", ".csv", ".xml", ".html", ".css", ".js"];
+
     [AllowAnonymous] // We allow anonymous because we rely on the Token
     [HttpPost("temp")]
     [RequestSizeLimit(1024 * 1024 * 500)]
@@ -72,40 +76,26 @@ public sealed class UploadsController(
 
         if (file == null || file.Length == 0) return BadRequest("Empty file.");
 
+        var userExtension = Path.GetExtension(file.FileName).ToLowerInvariant();
+
         using (var streamCheck = file.OpenReadStream())
         {
-            // A. Identify the file (What IS it?)
-            var detectedFormat = inspector.DetermineFileFormat(streamCheck);
-
-            if (detectedFormat == null)
+            // [LOGIC SWITCH]
+            // If it is a text file, we validate UTF8 content.
+            // If it is binary, we validate Magic Numbers (Signature).
+            if (_textExtensions.Contains(userExtension))
             {
-                return BadRequest("File type not recognized.");
+                var (IsValid, Error) = ValidateTextFile(streamCheck, userExtension, allowedMimeTypes);
+                if (!IsValid) return BadRequest(Error);
             }
-
-            // B. POLICY CHECK (MimeType Based)
-            // If allowedMimeTypes is NULL, we skip this check (Wildcard mode)
-            if (allowedMimeTypes != null)
+            else
             {
-                // FileSignatures provides the MediaType (e.g. "image/jpeg")
-                bool isAllowed = allowedMimeTypes.Contains(detectedFormat.MediaType.ToLowerInvariant());
-
-                if (!isAllowed)
-                {
-                    return BadRequest($"File type '{detectedFormat.MediaType}' is not allowed by policy.");
-                }
-            }
-
-            // C. SPOOF CHECK: Does the Name match the Content?
-            var userExt = Path.GetExtension(file.FileName).TrimStart('.').ToLowerInvariant();
-            if (!IsExtensionValid(userExt, detectedFormat.Extension))
-            {
-                return BadRequest("Security Alert: File extension does not match file content.");
+                var (IsValid, Error) = ValidateBinarySignature(streamCheck, file.FileName, allowedMimeTypes);
+                if (!IsValid) return BadRequest(Error);
             }
         }
 
-
         // --- STEP 4: SAVE TO DISK (Standard Logic) ---
-        // (Same as previous code...)
         var tempRoot = Path.Combine(Path.GetTempPath(), "KillaCoreUploads");
 
         Directory.CreateDirectory(tempRoot);
@@ -128,6 +118,101 @@ public sealed class UploadsController(
         bridge.RegisterFile(handoffToken, tempPath);
 
         return Ok(new { token = handoffToken, size = file.Length });
+    }
+
+    private static (bool IsValid, string? Error) ValidateTextFile(Stream stream, string extension, HashSet<string>? allowedMimes)
+    {
+        // 1. Infer MimeType using the Library (Source of Truth)
+        string assumedMime;
+        try
+        {
+            // "extension" already comes in with a dot (e.g. ".md") from the calling method
+            assumedMime = MimeTypesMap.GetMimeType(extension);
+        }
+        catch
+        {
+            // Fallback for unknown extensions
+            assumedMime = "application/octet-stream";
+        }
+
+        // 2. Policy Check
+        if (allowedMimes != null && !allowedMimes.Contains(assumedMime))
+        {
+            return (false, $"File type '{assumedMime}' is not allowed by policy.");
+        }
+
+        // 3. Content Check (UTF-8 Validation)
+        if (!IsValidUtf8Text(stream))
+        {
+            return (false, "Security Alert: File contains binary data but claims to be text.");
+        }
+
+        return (true, null);
+    }
+
+    private (bool IsValid, string? Error) ValidateBinarySignature(Stream stream, string fileName, HashSet<string>? allowedMimes)
+    {
+        // 1. Identify the file (Magic Number Check)
+        var detectedFormat = inspector.DetermineFileFormat(stream);
+
+        if (detectedFormat == null)
+        {
+            // If inspector returns null, it's either an unknown binary or a text file that slipped through
+            return (false, "File type not recognized or signature missing.");
+        }
+
+        // 2. Policy Check (MimeType Based)
+        if (allowedMimes != null)
+        {
+            bool isAllowed = allowedMimes.Contains(detectedFormat.MediaType.ToLowerInvariant());
+            if (!isAllowed)
+            {
+                return (false, $"File type '{detectedFormat.MediaType}' is not allowed by policy.");
+            }
+        }
+
+        // 3. Spoof Check: Does the Name match the Content?
+        var userExt = Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant();
+        if (!IsExtensionValid(userExt, detectedFormat.Extension))
+        {
+            return (false, "Security Alert: File extension does not match file content.");
+        }
+
+        return (true, null);
+    }
+
+    private static bool IsValidUtf8Text(Stream stream)
+    {
+        try
+        {
+            if (stream.Length == 0) return true;
+
+            // Reset position just in case
+            stream.Position = 0;
+
+            int b;
+            // Check first 4KB
+            int checkLength = Math.Min((int)stream.Length, 4096);
+
+            for (int i = 0; i < checkLength; i++)
+            {
+                b = stream.ReadByte();
+                // A null byte (0x00) is the strongest indicator of a binary file.
+                // Valid text (even Markdown) almost never contains null bytes.
+                if (b == 0)
+                {
+                    stream.Position = 0;
+                    return false;
+                }
+            }
+
+            stream.Position = 0;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void TryDelete(string path)

@@ -10,7 +10,7 @@
 		<Description>A standardized, concurrency-managed file uploader for Blazor.</Description>
 		<Authors>Carlos Teixeira</Authors>
 		<Company>KillaCore</Company>
-		<Version>1.0.11</Version>
+		<Version>1.0.12</Version>
 		<Configurations>Debug;Release</Configurations>
 		<PackageIcon>icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
@@ -29,6 +29,7 @@
 	<ItemGroup>
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
 		<PackageReference Include="FileSignatures" Version="6.1.1" />
+		<PackageReference Include="MimeTypesMap" Version="1.0.9" />
 	</ItemGroup>
 
 	<ItemGroup>
