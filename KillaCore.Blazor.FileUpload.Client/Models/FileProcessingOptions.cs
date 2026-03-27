@@ -31,16 +31,4 @@ public sealed class FileProcessingOptions
     public int MaxConcurrentUploads { get; set; } = 5;      // Network Bound (JS Interop)
     public int MaxConcurrentProcessors { get; set; } = 2;   // CPU Bound (Hashing/Saving)
     public int UIProgressUpdateIntervalMs { get; set; } = 400;
-    public TransferProgressWeights Weights { get; set; } = new();
-}
-
-
-public record TransferProgressWeights(
-    double UploadWeight = 0.60, // 60% of total bar
-    double HashWeight = 0.30,   // 30% of total bar
-    double SaveWeight = 0.10    // 10% of total bar
-)
-{
-    // Helper to ensure math is valid
-    public bool IsValid => Math.Abs((UploadWeight + HashWeight + SaveWeight) - 1.0) < 0.001;
 }

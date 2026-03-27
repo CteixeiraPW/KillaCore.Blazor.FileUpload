@@ -41,15 +41,13 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     // --- INTERNAL STATE ---
     private IJSObjectReference? _jsModule;
     private CancellationTokenSource? _batchCts;
-    private Channel<ProcessingJob>? _cpuChannel;
+
     private DotNetObjectReference<FileUploadProcessor>? _dotNetRef;
     private readonly ConcurrentDictionary<string, string> _localHashCache = new();
     private string _currentBatchId = string.Empty;
 
     // State for the Policy Token
     private string _policyToken = string.Empty;
-
-    private record ProcessingJob(FileTransferData Model, string ClaimToken);
 
     private record UploadResponse(
         [property: System.Text.Json.Serialization.JsonPropertyName("token")] string Token,
@@ -113,15 +111,14 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     public async Task ProcessInputFiles(IReadOnlyList<IBrowserFile> browserFiles)
     {
         Clear();
-
-        var weights = FileTransferDataHelpers.CalculateWeights(Options);
+        
         int acceptedCount = 0;
 
         foreach (var file in browserFiles)
         {
             string effectiveContentType = GetEffectiveContentType(file);
 
-            var model = new FileTransferData(file.Name, file.Size, effectiveContentType, weights)
+            var model = new FileTransferData(file.Name, file.Size, effectiveContentType)
             {
                 Index = acceptedCount,
                 BatchId = _currentBatchId,
@@ -166,7 +163,6 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         if (_transfers.All(t => t.IsFinished)) return;
 
         await FireEventAsync(EventNotificationType.BatchStarted);
-        _cpuChannel = Channel.CreateUnbounded<ProcessingJob>();
 
         _ = RunNetworkProducerAsync(_batchCts!.Token);
     }
@@ -293,9 +289,10 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 {
                     await ClientService.NotifyBatchCompletedAsync(_currentBatchId, _transfers, CancellationToken.None);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // Log or handle failure to notify the server
+                    // FIXED: Actually log the error so you can see it!
+                    Console.WriteLine($"[API Error] Failed to notify batch completed: {ex.Message}");
                 }
 
                 // 2. Fire the UI's local callback

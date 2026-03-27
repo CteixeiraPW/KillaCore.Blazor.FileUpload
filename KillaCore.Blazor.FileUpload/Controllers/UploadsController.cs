@@ -59,7 +59,6 @@ public sealed class UploadsController(
         return Ok("test");
     }
 
-
     // List of extensions that do not have "Magic Numbers" and must be validated by content
     private static readonly HashSet<string> _textExtensions = [".txt", ".md", ".markdown", ".json", ".csv", ".xml", ".html", ".css", ".js"];
 
@@ -161,21 +160,34 @@ public sealed class UploadsController(
 
         if (hooks != null)
         {
+            // 1. Read the BatchId sent from Javascript
+            string clientBatchId = Request.Headers.TryGetValue("X-Batch-Id", out var bId)
+                ? bId.ToString()
+                : string.Empty;
+
             // Rebuild a basic FileTransferData model for the backend to use
             var model = new FileTransferData
             {
                 Id = handoffToken,
                 FileName = file.FileName,
                 FileSize = file.Length,
-                MimeType = file.ContentType ?? "application/octet-stream"
+                MimeType = file.ContentType ?? "application/octet-stream",
+                BatchId = clientBatchId
             };
 
             try
             {
+                // 2. CALCULATE THE HASH (So CheckRemoteDuplicateAsync actually runs)
+                using (var hashStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read))
+                using (var sha256 = System.Security.Cryptography.SHA256.Create())
+                {
+                    var hashBytes = await sha256.ComputeHashAsync(hashStream, ct);
+                    model.DetectedHash = Convert.ToHexString(hashBytes);
+                }
+
                 bool isDuplicate = false;
 
-                // If you implement a hashing step here in the future, you would set model.DetectedHash
-                // and then check it against CheckRemoteDuplicateAsync.
+                // Now this will ALWAYS fire because DetectedHash is populated!
                 if (model.DetectedHash != null)
                 {
                     isDuplicate = await hooks.CheckRemoteDuplicateAsync(model.DetectedHash, ct);
@@ -189,6 +201,11 @@ public sealed class UploadsController(
 
                     // Capture the final DB ID set by the developer's hook
                     finalId = model.FinalResourceId;
+                }
+                else
+                {
+                    // Tell the UI that it was rejected as a duplicate
+                    return BadRequest("File is a remote duplicate.");
                 }
             }
             catch (Exception ex)

@@ -1,4 +1,6 @@
-﻿namespace KillaCore.Blazor.FileUpload.Client.Models;
+﻿using System.Text.Json.Serialization;
+
+namespace KillaCore.Blazor.FileUpload.Client.Models;
 
 public sealed class FileTransferData : IDisposable
 {
@@ -9,14 +11,15 @@ public sealed class FileTransferData : IDisposable
     public string FileName { get; set; } = string.Empty;
     public long FileSize { get; set; } = 0;
     public string MimeType { get; set; } = string.Empty;
-    public TransferProgressWeights Weights { get; set; } = new();
-
+    
     // --- State ---
+    [JsonIgnore]
     public TransferStage Stage { get; set; } = TransferStage.Pending;
     public TransferStatus Status { get; set; } = TransferStatus.Pending;
     public string StatusMessage { get; set; } = "Queued";
 
     // "Local" Progress (0-100) for the current active stage
+    [JsonIgnore]
     public double StageProgressPercent { get; set; }
 
     // --- Artifacts ---
@@ -28,6 +31,8 @@ public sealed class FileTransferData : IDisposable
     public DateTime LastUIUpdate { get; set; } = DateTime.MinValue;
     public DateTime StartTime { get; set; } // [NEW] Good for calculating speed
     public DateTime? EndTime { get; set; }  // [NEW] Good for analytics
+
+    [JsonIgnore]
     public CancellationTokenSource IndividualCts { get; set; } = new();
 
     // --- Construstors & Init ---
@@ -35,12 +40,11 @@ public sealed class FileTransferData : IDisposable
     {
     }
 
-    public FileTransferData(string fileName, long fileSize, string mimeType, TransferProgressWeights weights)
+    public FileTransferData(string fileName, long fileSize, string mimeType)
     {
         FileName = fileName;
         FileSize = fileSize;
         MimeType = mimeType;
-        Weights = weights;
     }
 
     public bool IsFinished => Status is TransferStatus.Completed or TransferStatus.Failed or TransferStatus.Cancelled or TransferStatus.Skipped;
@@ -50,88 +54,22 @@ public sealed class FileTransferData : IDisposable
     {
         get
         {
-            //These are the easy cases first
-            if (Status == TransferStatus.Completed) return 100;
-            if (Status == TransferStatus.Skipped) return 100;
+            if (Status == TransferStatus.Completed || Status == TransferStatus.Skipped) return 100;
+            if (Status == TransferStatus.Pending) return 0;
 
-            // Handle Cancelled/Failed with partial progress
+            // For Failed/Cancelled, leave the bar exactly where it died during upload
             if (Status == TransferStatus.Cancelled || Status == TransferStatus.Failed)
-            {    
-                double progressUp = 0;
-                // Accumulate full weights for completed stages
-                if (Stage > TransferStage.Uploading)
-                {
-                    progressUp += Weights.UploadWeight * 100;
-                }
-                if (Stage > TransferStage.Hashing)
-                {
-                    progressUp += Weights.HashWeight * 100;
-                }
-                if (Stage > TransferStage.ServerSaving)
-                {
-                    progressUp += Weights.SaveWeight * 100;
-                }
-                
-                // Add partial weight for the current stage
-                if (Stage == TransferStage.Uploading)
-                {
-                    progressUp += Weights.UploadWeight * StageProgressPercent;
-                }
-                else if (Stage == TransferStage.Hashing)
-                {
-                    progressUp += Weights.HashWeight * StageProgressPercent;
-                }
-                else if (Stage == TransferStage.ServerSaving)
-                {
-                    progressUp += Weights.SaveWeight * StageProgressPercent;
-                }
-                return Math.Min(progressUp, 100);
+            {
+                return StageProgressPercent;
             }
 
-            if (Stage == TransferStage.Pending) return 0;
-
-            // Base accumulator
-            double total = 0;
-
-            // 1. UPLOADING (Always happens)
-            // If we are currently uploading, we add portion of the UploadWeight.
-            // If we passed uploading, we add the FULL UploadWeight.
+            // During Uploading, just use the raw network percentage (0 to 100)
             if (Stage == TransferStage.Uploading)
             {
-                return Weights.UploadWeight * StageProgressPercent;
-            }
-            total += Weights.UploadWeight * 100;
-
-            // 2. HASHING (Optional)
-            if (Weights.HashWeight > 0)
-            {
-                if (Stage == TransferStage.Hashing)
-                {
-                    return total + (Weights.HashWeight * StageProgressPercent);
-                }
-                // If we are past hashing (Verifying or Saving), add full Hash weight
-                // Note: We check if stage > Hashing to avoid adding it prematurely
-                if (Stage > TransferStage.Hashing)
-                {
-                    total += Weights.HashWeight * 100;
-                }
+                return StageProgressPercent;
             }
 
-            // 3. SAVING (Optional)
-            if (Weights.SaveWeight > 0)
-            {
-                if (Stage == TransferStage.ServerSaving)
-                {
-                    return total + (Weights.SaveWeight * StageProgressPercent);
-                }
-                // If completed, loop top catches it. If skipped, it won't be here.
-            }
-
-            // 4. "Fixed" Stages (Verification)
-            // These stages happen instantly or have no progress bar. 
-            // The user sees the bar "full" up to the previous step while these run.
-            // We just return the total accumulated so far.
-            return Math.Min(total, 100);
+            return 0;
         }
     }
 
@@ -143,31 +81,5 @@ public sealed class FileTransferData : IDisposable
         // Suppress finalization (good practice, though strictly not needed 
         // unless you have a finalizer, which you don't need here)
         GC.SuppressFinalize(this);
-    }
-}
-
-internal static class FileTransferDataHelpers
-{
-    internal static TransferProgressWeights CalculateWeights(FileProcessingOptions options)
-    {
-        // 1. Check the SAFE enum to see what is enabled
-        bool isHashingActive = options.EnabledFeatures.Contains(FileUploadFeature.VerifyLocalDuplicates)
-                            || options.EnabledFeatures.Contains(FileUploadFeature.VerifyRemoteDuplicates);
-
-        bool isSavingActive = options.EnabledFeatures.Contains(FileUploadFeature.SaveToServer);
-
-        // 2. Assign "Effort Points" (Relative difficulty)
-        double uploadPoints = options.Weights.UploadWeight;
-        double hashPoints = isHashingActive ? options.Weights.HashWeight : 0;
-        double savePoints = isSavingActive ? options.Weights.SaveWeight : 0;
-
-        double totalPoints = uploadPoints + hashPoints + savePoints;
-
-        // 3. Normalize
-        return new TransferProgressWeights(
-            UploadWeight: uploadPoints / totalPoints,
-            HashWeight: hashPoints / totalPoints,
-            SaveWeight: savePoints / totalPoints
-        );
     }
 }

@@ -50,6 +50,13 @@ public class ApplicationUploadHooks(
             await using var fs = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true);
             await fileStream.CopyToAsync(fs, ct);
 
+            // --- ADDED: Fake 5-second DB bottleneck to test Cancellation ---
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Faking a slow 5-second DB operation for {File}...", data.FileName);
+
+            await Task.Delay(5000, ct); // Pass the token so it interrupts instantly!
+            // ---------------------------------------------------------------
+
             // 4. Save the metadata to the static list
             var newRecord = new FileMetadataEntity
             {
@@ -73,16 +80,18 @@ public class ApplicationUploadHooks(
                     data.FileName, destinationPath, _fakeDatabase.Count);
             }
         }
+        catch (OperationCanceledException)
+        {
+            // The user clicked Cancel on the UI, which aborted the HTTP request!
+            logger.LogWarning("Upload of {Name} was cancelled by the user during saving.", data.FileName);
+
+            if (File.Exists(destinationPath)) File.Delete(destinationPath);
+            throw; // Rethrow so the Controller knows it was cancelled
+        }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to save file {Name}", data.FileName);
-
-            // Clean up the partial file if something fails
-            if (File.Exists(destinationPath))
-            {
-                File.Delete(destinationPath);
-            }
-
+            if (File.Exists(destinationPath)) File.Delete(destinationPath);
             throw;
         }
     }

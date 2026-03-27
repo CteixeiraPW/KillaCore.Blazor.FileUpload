@@ -34,9 +34,10 @@ export function uploadFile(
         const xhr = new XMLHttpRequest();
         xhr.open("POST", url, true);
 
-        // --- CHANGED: Dynamic Header Names & Policy Injection ---
+        // --- CHANGED: Dynamic Header Names, Policy Injection, and Batch ID ---
         xhr.setRequestHeader(tokenHeaderName, uploadToken);
         xhr.setRequestHeader(policyHeaderName, policyToken);
+        xhr.setRequestHeader("X-Batch-Id", batchId);
         xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
 
         // --- Progress Reporting (Unchanged) ---
