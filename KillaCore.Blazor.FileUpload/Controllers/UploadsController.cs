@@ -1,11 +1,12 @@
 ﻿using FileSignatures;
 using HeyRed.Mime;
-using KillaCore.Blazor.FileUpload.Services; // Namespace for your Security Service
+using KillaCore.Blazor.FileUpload.Client.Models;
+using KillaCore.Blazor.FileUpload.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-
+using Microsoft.Extensions.DependencyInjection;
 
 namespace KillaCore.Blazor.FileUpload.Controllers;
 
@@ -15,9 +16,49 @@ public sealed class UploadsController(
     IFileUploadSecurityService securityService, // 1. Inject Security
     IFileUploadBridgeService bridge,         // 2. Inject the Bridge
     IFileFormatInspector inspector,    // 3. Inject the Magic Number Inspector
-    IDataProtectionProvider dpProvider // 4. Data Protection Provider
+    IDataProtectionProvider dpProvider, // 4. Data Protection Provider
+    IServiceProvider serviceProvider   // 5. Inject Service Provider for Optional Hooks
     ) : ControllerBase
 {
+    [HttpPost("policy")]
+    public IActionResult GeneratePolicy([FromBody] List<string>? allowedMimeTypes)
+    {
+        var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY);
+        string rulesPayload = allowedMimeTypes == null || allowedMimeTypes.Count == 0 ? "*" : string.Join(",", allowedMimeTypes);
+        return Ok(new { token = protector.Protect(rulesPayload) });
+    }
+
+    [HttpGet("token/{fileId}")]
+    public IActionResult GenerateToken(string fileId)
+    {
+        var userId = User.Identity?.Name ?? "Anonymous";
+        var token = securityService.GenerateToken(fileId, userId);
+        return Ok(new { token });
+    }
+
+    [HttpPost("batch/{batchId}/complete")]
+    public async Task<IActionResult> CompleteBatch(string batchId, [FromBody] List<FileTransferData> files)
+    {
+        // You can optionally add security checks here to ensure the user owns the batchId
+
+        var hooks = serviceProvider.GetService<IFileUploadServerHooks>();
+
+        if (hooks != null)
+        {
+            // Execute the developer's server-side logic (e.g., updating database records, 
+            // sending an email summary, or triggering an AI processor)
+            await hooks.OnBatchCompletedAsync(batchId, files);
+        }
+
+        return Ok();
+    }
+
+    [HttpGet("test")]
+    public async Task<IActionResult> Test()
+    {
+        return Ok("test");
+    }
+
 
     // List of extensions that do not have "Magic Numbers" and must be validated by content
     private static readonly HashSet<string> _textExtensions = [".txt", ".md", ".markdown", ".json", ".csv", ".xml", ".html", ".css", ".js"];
@@ -29,7 +70,7 @@ public sealed class UploadsController(
     {
         // --- STEP 1: EXTRACT & VALIDATE POLICY (The "What is Allowed?" check) ---
 
-        if (!Request.Headers.TryGetValue(FileUpload.Components.FileUploadProcessor.POLICY_HEADER_NAME, out var policyHeader))
+        if (!Request.Headers.TryGetValue(FileUploadConstants.POLICY_HEADER_NAME, out var policyHeader))
         {
             return BadRequest("Missing upload policy.");
         }
@@ -38,7 +79,7 @@ public sealed class UploadsController(
         try
         {
             // A. Create the Protector using the EXACT same purpose string as your Blazor Component
-            var protector = dpProvider.CreateProtector(FileUpload.Components.FileUploadProcessor.DATA_PROTECTION_POLICY);
+            var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY);
 
             // B. Decrypt the rules (e.g., "jpg,png,pdf")
             string decryptedRules = protector.Unprotect(policyHeader.ToString());
@@ -60,7 +101,7 @@ public sealed class UploadsController(
 
         // --- STEP 2: SECURITY & REPLAY CHECK ---
 
-        if (!Request.Headers.TryGetValue(FileUpload.Components.FileUploadProcessor.TOKEN_HEADER_NAME, out var tokenValues))
+        if (!Request.Headers.TryGetValue(FileUploadConstants.TOKEN_HEADER_NAME, out var tokenValues))
             return Unauthorized("Missing upload token.");
 
         var secureToken = tokenValues.ToString();
@@ -113,9 +154,48 @@ public sealed class UploadsController(
             return Problem(ex.Message);
         }
 
-        // --- STEP 5: HANDOVER ---
+        // --- STEP 5: HANDOVER & EXECUTE HOOKS ---
         var handoffToken = Guid.NewGuid().ToString("N");
         bridge.RegisterFile(handoffToken, tempPath);
+
+        // Resolve the user's hooks if they registered them in Program.cs
+        var hooks = serviceProvider.GetService<IFileUploadServerHooks>();
+
+        if (hooks != null)
+        {
+            // Rebuild a basic FileTransferData model for the backend to use
+            var model = new FileTransferData
+            {
+                Id = handoffToken,
+                FileName = file.FileName,
+                FileSize = file.Length,
+                MimeType = file.ContentType ?? "application/octet-stream"
+            };
+
+            try
+            {
+                bool isDuplicate = false;
+
+                // If you implement a hashing step here in the future, you would set model.DetectedHash
+                // and then check it against CheckRemoteDuplicateAsync.
+                if (model.DetectedHash != null)
+                {
+                    isDuplicate = await hooks.CheckRemoteDuplicateAsync(model.DetectedHash, ct);
+                }
+
+                if (!isDuplicate)
+                {
+                    // Save the File
+                    await using var finalStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
+                    await hooks.SaveFileAsync(model, finalStream, ct);
+                }
+            }
+            finally
+            {
+                // Clean up the temp file after the developer's hook is done saving it
+                TryDelete(tempPath);
+            }
+        }
 
         return Ok(new { token = handoffToken, size = file.Length });
     }

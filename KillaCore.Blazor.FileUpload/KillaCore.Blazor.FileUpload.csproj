@@ -1,6 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk.Razor">
 	<PropertyGroup>
-		<TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<PackageId>KillaCore.Blazor.FileUpload</PackageId>
@@ -28,7 +28,7 @@
 	
 	<ItemGroup>
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
-		<PackageReference Include="FileSignatures" Version="6.1.1" />
+		<PackageReference Include="FileSignatures" Version="7.0.0" />
 		<PackageReference Include="MimeTypesMap" Version="1.0.9" />
 	</ItemGroup>
 
@@ -43,6 +43,14 @@
 	<ItemGroup>
 		<None Include="icon.png" Pack="true" PackagePath="\" />
 		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
+	
+	<ItemGroup>
+	  <Folder Include="wwwroot\" />
+	</ItemGroup>
+	
+	<ItemGroup>
+	  <ProjectReference Include="..\KillaCore.Blazor.FileUpload.Client\KillaCore.Blazor.FileUpload.Client.csproj" />
 	</ItemGroup>
 
 	<Target Name="PublishNugetPackage" AfterTargets="Pack" Condition="'$(Configuration)'=='Release'">

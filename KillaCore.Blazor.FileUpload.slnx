@@ -5,6 +5,8 @@
     <File Path="LICENSE.txt" />
     <File Path="README.md" />
   </Folder>
-  <Project Path="KillaCore.Blazor.FileUpload.Test/KillaCore.Blazor.FileUpload.Test.csproj" Id="4a1f2503-34a6-4d4e-b2a8-f82301d1de9c" />
+  <Project Path="KillaCore.Blazor.FileUpload.Client/KillaCore.Blazor.FileUpload.Client.csproj" Id="dc6a4353-9a5b-4c60-92c8-290e39c31841" />
+  <Project Path="KillaCore.Blazor.FileUpload.Test/KillaCore.Blazor.FileUpload.Test.Client/KillaCore.Blazor.FileUpload.Test.Client.csproj" Id="43554d61-aad6-45ac-9cc5-932189442757" />
+  <Project Path="KillaCore.Blazor.FileUpload.Test/KillaCore.Blazor.FileUpload.Test/KillaCore.Blazor.FileUpload.Test.csproj" Id="74c4a53b-e088-4f28-b62d-76bf36a8bc84" />
   <Project Path="KillaCore.Blazor.FileUpload/KillaCore.Blazor.FileUpload.csproj" />
 </Solution>

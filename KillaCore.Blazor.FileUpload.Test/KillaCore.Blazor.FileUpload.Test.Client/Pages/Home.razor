@@ -1,0 +1,106 @@
+﻿@page "/"
+@using KillaCore.Blazor.FileUpload.Client.Components
+@using KillaCore.Blazor.FileUpload.Client.Models
+
+<PageTitle>Test File Upload</PageTitle>
+
+<div class="container mt-5">
+    <h1>Hello, world!</h1>
+    <p>Welcome to your new app. Let's test the file upload.</p>
+
+    <div class="card p-4 shadow-sm mb-4">
+        <label for="my-file-input" class="form-label fw-bold">Select files to upload:</label>
+        <InputFile id="my-file-input" class="form-control" OnChange="HandleFileSelection" multiple />
+    </div>
+
+    <FileUploadProcessor @ref="_processor"
+                         InputSelector="#my-file-input"
+                         Options="_uploadOptions"
+                         UserId="TestUser123"
+                         OnEvent="OnProcessorEvent"
+                         OnFilesUploadCompleted="OnBatchFinished" />
+
+    @if (_processor?.Transfers.Any() == true)
+    {
+        <div class="card p-4 shadow-sm">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h3 class="m-0">Upload Progress</h3>
+                <button class="btn btn-outline-danger btn-sm" @onclick="() => _processor.CancelAllAsync()">Cancel Batch</button>
+            </div>
+
+            <ul class="list-group">
+                @foreach (var file in _processor.Transfers)
+                {
+                    <li class="list-group-item">
+                        <div class="d-flex justify-content-between">
+                            <strong>@file.FileName</strong>
+                            <span class="text-muted">@(file.FileSize / 1024) KB</span>
+                        </div>
+
+                        <div class="mt-1 mb-2">
+                            <span class="badge bg-primary">@file.Stage.ToString()</span>
+                            <span class="badge bg-secondary">@file.Status.ToString()</span>
+                            <small class="text-muted ms-2">@file.StatusMessage</small>
+                        </div>
+
+                        <div class="progress" style="height: 20px;">
+                            <div class="progress-bar progress-bar-striped @(file.IsFinished ? "" : "progress-bar-animated")"
+                                 role="progressbar"
+                                 style="width: @(file.LifecyclePercent)%;"
+                                 aria-valuenow="@file.LifecyclePercent"
+                                 aria-valuemin="0" aria-valuemax="100">
+                                @file.LifecyclePercent.ToString("0")%
+                            </div>
+                        </div>
+                    </li>
+                }
+            </ul>
+        </div>
+    }
+</div>
+
+@code {
+    // Reference to the component so we can call methods and read state
+    private FileUploadProcessor _processor = default!;
+
+    // Configure how the package behaves
+    private readonly FileProcessingOptions _uploadOptions = new()
+    {
+        MaxFiles = 5,
+        MaxSizeFileBytes = 1024 * 1024 * 500, // 500 MB limit
+        MaxConcurrentUploads = 2,             // Upload 2 files at a time
+        UploadEndpointUrl = "api/uploads/temp", // Point to the Controller
+        AllowedMimeTypes = ["image/jpeg", "image/png", "application/pdf"],
+        EnabledFeatures = [FileUploadFeature.SaveToServer, FileUploadFeature.VerifyRemoteDuplicates]
+    };
+
+    // Fired when the user clicks "Browse..." and picks files
+    private async Task HandleFileSelection(InputFileChangeEventArgs e)
+    {
+        // Get the files from Blazor
+        var files = e.GetMultipleFiles(_uploadOptions.MaxFiles).ToList();
+
+        // Hand them off to your processor to start the pipeline
+        if (_processor != null)
+        {
+            await _processor.ProcessInputFiles(files);
+        }
+    }
+
+    // Fired continuously by the processor as progress updates
+    private void OnProcessorEvent(FileNotificationEvent notification)
+    {
+        // The processor updates its internal state, but Blazor doesn't know
+        // the host page needs to re-render the progress bars. We force a re-render here.
+        StateHasChanged();
+    }
+
+    // Fired when the whole batch is done
+    private Task OnBatchFinished(IReadOnlyList<FileTransferData> files, string batchId)
+    {
+        int success = files.Count(x => x.Status == TransferStatus.Completed);
+        Console.WriteLine($"Batch {batchId} finished! {success} out of {files.Count} succeeded.");
+
+        return Task.CompletedTask;
+    }
+}
