@@ -32,6 +32,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IFileFormatInspector>(new FileFormatInspector(allFormats));
 
         // 3. Register Core Services
+        services.AddMemoryCache();
         services.TryAddSingleton<IFileUploadSecurityService>(new HmacFileUploadSecurityService(secretKey));
         services.TryAddSingleton<IFileUploadBridgeService, FileUploadBridgeService>();
 

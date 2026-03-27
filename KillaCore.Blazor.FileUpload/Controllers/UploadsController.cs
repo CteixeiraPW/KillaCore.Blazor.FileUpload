@@ -156,10 +156,8 @@ public sealed class UploadsController(
 
         // --- STEP 5: HANDOVER & EXECUTE HOOKS ---
         var handoffToken = Guid.NewGuid().ToString("N");
-        bridge.RegisterFile(handoffToken, tempPath);
-
-        // Resolve the user's hooks if they registered them in Program.cs
         var hooks = serviceProvider.GetService<IFileUploadServerHooks>();
+        string? finalId = null;
 
         if (hooks != null)
         {
@@ -188,7 +186,15 @@ public sealed class UploadsController(
                     // Save the File
                     await using var finalStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
                     await hooks.SaveFileAsync(model, finalStream, ct);
+
+                    // Capture the final DB ID set by the developer's hook
+                    finalId = model.FinalResourceId;
                 }
+            }
+            catch (Exception ex)
+            {
+                // Surface the developer's error directly to the UI's StatusMessage
+                return BadRequest($"Server processing error: {ex.Message}");
             }
             finally
             {
@@ -196,8 +202,14 @@ public sealed class UploadsController(
                 TryDelete(tempPath);
             }
         }
+        else
+        {
+            // Only bridge the file into memory if there are no hooks to handle it immediately
+            bridge.RegisterFile(handoffToken, tempPath);
+        }
 
-        return Ok(new { token = handoffToken, size = file.Length });
+        // Return the finalId so the Blazor Client can link the file to the DB record
+        return Ok(new { token = handoffToken, size = file.Length, finalId });
     }
 
     private static (bool IsValid, string? Error) ValidateTextFile(Stream stream, string extension, HashSet<string>? allowedMimes)

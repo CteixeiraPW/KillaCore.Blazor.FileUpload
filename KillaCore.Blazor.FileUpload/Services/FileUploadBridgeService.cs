@@ -1,18 +1,10 @@
-﻿using System.Collections.Concurrent;
+﻿using Microsoft.Extensions.Caching.Memory;
+using System.Collections.Concurrent;
 
 namespace KillaCore.Blazor.FileUpload.Services;
 
-internal class FileUploadBridgeService : IFileUploadBridgeService, IDisposable
+internal class FileUploadBridgeService(IMemoryCache cache) : IFileUploadBridgeService
 {
-    // STORAGE 1: Files waiting to be processed by Blazor
-    // Key: Token, Value: (Path, Expiration)
-    private readonly ConcurrentDictionary<string, FileEntry> _pendingFiles = new();
-
-    // STORAGE 2: Used Security Keys (Anti-Replay)
-    // Key: UniqueID, Value: Expiration
-    private readonly ConcurrentDictionary<string, DateTime> _usedKeys = new();
-
-    private readonly Timer _cleanupTimer;
 
     // Config: How long a file sits on disk before we delete it as "abandoned"
     private readonly TimeSpan _fileRetentionPeriod = TimeSpan.FromMinutes(20);
@@ -20,40 +12,49 @@ internal class FileUploadBridgeService : IFileUploadBridgeService, IDisposable
     // Config: How long we remember a used key (should match your 5-min token lifetime)
     private readonly TimeSpan _keyRetentionPeriod = TimeSpan.FromMinutes(6);
 
-    public FileUploadBridgeService()
-    {
-        // Run cleanup every 1 minute
-        _cleanupTimer = new Timer(ExecuteCleanup, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
-    }
+    // We keep ConcurrentDictionary for keys to guarantee a 100% thread-safe atomic TryAdd 
+    // to strictly prevent race conditions in replay attacks.
+    private readonly ConcurrentDictionary<string, byte> _usedKeys = new();
 
     // --- PART 1: FILE HANDOVER LOGIC ---
 
     public void RegisterFile(string token, string tempFilePath)
     {
-        var entry = new FileEntry(tempFilePath, DateTime.UtcNow.Add(_fileRetentionPeriod));
-        _pendingFiles.TryAdd(token, entry);
+        var options = new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = _fileRetentionPeriod
+        };
+
+        // This tells the framework: "When this entry expires, run this method"
+        options.RegisterPostEvictionCallback((key, value, reason, state) =>
+        {
+            // FIXED: Changed CacheEntryRemovedReason to EvictionReason
+            // Only delete the file if it was evicted due to Expiration or Memory Pressure.
+            // DO NOT delete it if the reason is 'Removed' (which means the user successfully claimed it).
+            if (reason != EvictionReason.Removed && value is string path)
+            {
+                SafeDeleteFile(path);
+            }
+        });
+
+        cache.Set($"file_{token}", tempFilePath, options);
     }
 
     public bool TryClaimFile(string token, out string? tempFilePath)
     {
-        tempFilePath = null;
+        string cacheKey = $"file_{token}";
 
-        // Atomic Operation: Try to Get AND Remove.
-        // This ensures that even if called in parallel, only one thread gets the file.
-        if (_pendingFiles.TryRemove(token, out var entry))
+        if (cache.TryGetValue(cacheKey, out string? path))
         {
-            // Check if it expired before we grabbed it
-            if (DateTime.UtcNow > entry.ExpiresAt)
-            {
-                // It's expired. Delete the physical file immediately.
-                SafeDeleteFile(entry.FilePath);
-                return false;
-            }
+            tempFilePath = path;
 
-            tempFilePath = entry.FilePath;
+            // Remove it from the cache so it can't be claimed a second time.
+            // This triggers the eviction callback with reason = 'Removed', so the file is kept safe.
+            cache.Remove(cacheKey);
             return true;
         }
 
+        tempFilePath = null;
         return false;
     }
 
@@ -61,41 +62,31 @@ internal class FileUploadBridgeService : IFileUploadBridgeService, IDisposable
 
     public bool RegisterUsedKey(string uniqueId)
     {
-        var expiry = DateTime.UtcNow.Add(_keyRetentionPeriod);
-
-        // TryAdd returns FALSE if the key already exists.
-        // This is the core of the "One-Time Use" check.
-        return _usedKeys.TryAdd(uniqueId, expiry);
-    }
-
-    // --- PART 3: GARBAGE COLLECTION (The "Janitor") ---
-
-    private void ExecuteCleanup(object? state)
-    {
-        var now = DateTime.UtcNow;
-
-        // 1. Clean up Abandoned Files
-        foreach (var kvp in _pendingFiles)
+        // 1. Strict atomic check to prevent simultaneous requests from using the same token
+        if (!_usedKeys.TryAdd(uniqueId, 1))
         {
-            if (now > kvp.Value.ExpiresAt)
-            {
-                // Remove from dictionary
-                if (_pendingFiles.TryRemove(kvp.Key, out var entry))
-                {
-                    // CRITICAL: Delete the actual file from the disk
-                    SafeDeleteFile(entry.FilePath);
-                }
-            }
+            return false; // Key was already used!
         }
 
-        // 2. Clean up Old Replay Keys (Just memory cleanup)
-        foreach (var kvp in _usedKeys)
+        // 2. Delegate the cleanup schedule to IMemoryCache
+        var options = new MemoryCacheEntryOptions
         {
-            if (now > kvp.Value)
+            AbsoluteExpirationRelativeToNow = _keyRetentionPeriod
+        };
+
+        options.RegisterPostEvictionCallback((key, value, reason, state) =>
+        {
+            // When the cache timer expires, silently clean up the ConcurrentDictionary
+            var tokenKey = key?.ToString()?.Replace("key_", "");
+            if (tokenKey != null)
             {
-                _usedKeys.TryRemove(kvp.Key, out _);
+                _usedKeys.TryRemove(tokenKey, out _);
             }
-        }
+        });
+
+        cache.Set($"key_{uniqueId}", true, options);
+
+        return true;
     }
 
     private static void SafeDeleteFile(string path)
@@ -107,15 +98,6 @@ internal class FileUploadBridgeService : IFileUploadBridgeService, IDisposable
         catch
         {
             // Suppress errors. The file might be locked or already gone.
-            // In a real library, you might want to log this internally.
         }
     }
-
-    public void Dispose()
-    {
-        _cleanupTimer?.Dispose();
-    }
-
-    // Helper Record
-    private record FileEntry(string FilePath, DateTime ExpiresAt);
 }

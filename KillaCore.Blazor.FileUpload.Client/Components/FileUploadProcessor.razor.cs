@@ -51,6 +51,12 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
     private record ProcessingJob(FileTransferData Model, string ClaimToken);
 
+    private record UploadResponse(
+        [property: System.Text.Json.Serialization.JsonPropertyName("token")] string Token,
+        [property: System.Text.Json.Serialization.JsonPropertyName("size")] long Size,
+        [property: System.Text.Json.Serialization.JsonPropertyName("finalId")] string? FinalId
+    );
+
     // --- LIFECYCLE ---
     protected override void OnInitialized()
     {
@@ -238,7 +244,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
                     if (_jsModule != null)
                     {
-                        var claimToken = await _jsModule.InvokeAsync<string>(
+                        var response = await _jsModule.InvokeAsync<UploadResponse>(
                             "uploadFile",
                             ct,
                             _dotNetRef,
@@ -252,15 +258,14 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                             FileUploadConstants.POLICY_HEADER_NAME
                             );
 
-                        if (!string.IsNullOrEmpty(claimToken))
+                        if (response != null && !string.IsNullOrEmpty(response.Token))
                         {
-                            // In the separated architecture, we just mark it as handed off to the server
-                            model.Stage = TransferStage.Hashing;
-                            model.StatusMessage = "Processing on server...";
-                            await FireEventAsync(EventNotificationType.StageChange, model);
-
-                            // Note: You might want an API poll here to check when the server finishes,
-                            // or rely on SignalR to push the "Completed" status.
+                            model.FinalResourceId = response.FinalId;
+                            model.Stage = TransferStage.Completed; // Assuming you have this enum
+                            model.Status = TransferStatus.Completed; // CRITICAL FIX
+                            model.EndTime = DateTime.UtcNow;
+                            model.StatusMessage = "Upload complete";
+                            await FireEventAsync(EventNotificationType.FileCompleted, model);
                         }
                     }
                 }

@@ -62,9 +62,8 @@ export function uploadFile(
             if (xhr.status >= 200 && xhr.status < 300) {
                 try {
                     const response = JSON.parse(xhr.responseText);
-                    const claimToken = response.token;
 
-                    if (claimToken) resolve(claimToken);
+                    if (response.token) resolve(response);
                     else reject("No Claim Token returned from server");
                 } catch (e) {
                     // This catches the case where the server returns non-JSON (like the HTML error)

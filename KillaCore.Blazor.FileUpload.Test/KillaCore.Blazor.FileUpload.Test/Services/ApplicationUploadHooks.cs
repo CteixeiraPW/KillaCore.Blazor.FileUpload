@@ -22,7 +22,7 @@ public class ApplicationUploadHooks(
         // Query the in-memory list
         bool exists = _fakeDatabase.Any(f => f.FileHash == detectedHash);
 
-        if (exists)
+        if (exists && logger.IsEnabled(LogLevel.Information))
         {
             logger.LogInformation("Duplicate upload prevented. Hash: {Hash}", detectedHash);
         }
@@ -67,8 +67,11 @@ public class ApplicationUploadHooks(
             // 5. Update the package's model so the UI knows where it landed
             data.FinalResourceId = newRecord.Id.ToString();
 
-            logger.LogInformation("Successfully saved file {Name} to {Path}. Fake DB Total: {Count}",
-                data.FileName, destinationPath, _fakeDatabase.Count);
+            if (logger.IsEnabled(LogLevel.Information))
+            {
+                logger.LogInformation("Successfully saved file {Name} to {Path}. Fake DB Total: {Count}",
+                    data.FileName, destinationPath, _fakeDatabase.Count);
+            }
         }
         catch (Exception ex)
         {
@@ -92,8 +95,11 @@ public class ApplicationUploadHooks(
         int successCount = files.Count(f => f.Status == TransferStatus.Completed);
         int failedCount = files.Count(f => f.Status == TransferStatus.Failed);
 
-        logger.LogInformation("Batch {BatchId} completed. {Success} saved, {Failed} failed. Total files in system history: {TotalDb}",
-            batchId, successCount, failedCount, _fakeDatabase.Count);
+        if (logger.IsEnabled(LogLevel.Information))
+        {
+            logger.LogInformation("Batch {BatchId} completed. {Success} saved, {Failed} failed. Total files in system history: {TotalDb}",
+                batchId, successCount, failedCount, _fakeDatabase.Count);
+        }
 
         return Task.CompletedTask;
     }

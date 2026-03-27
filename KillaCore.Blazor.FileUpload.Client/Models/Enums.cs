@@ -45,7 +45,9 @@ public enum TransferStage
     [Description("Verifying Remote Duplicates")]
     VerifyingRemoteDuplicates,   // Checking against the Server DB/API
     [Description("Saving to Server")]
-    ServerSaving                // Moving temp file to final storage
+    ServerSaving,                // Moving temp file to final storage
+    [Description("Complete")]
+    Completed
 }
 
 // This enum ONLY contains the optional features the user can toggle.
