@@ -4,8 +4,28 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+
+    <PackageId>KillaCore.Blazor.FileUpload.Client</PackageId>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <Title>Blazor WebAssembly/Client FileUpload</Title>
+    <Description>The client-side UI components and WebAssembly/Auto support for the KillaCore.Blazor.FileUpload pipeline.</Description>
+    <Authors>Carlos Teixeira</Authors>
+    <Company>KillaCore</Company>
+    <Version>1.1.0</Version>
+    <Configurations>Debug;Release</Configurations>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl></PackageProjectUrl>
+    <PackageTags>Blazor;Upload;File;Concurrency;WebAssembly;WASM</PackageTags>
+    <RepositoryUrl>https://github.com/CteixeiraPW/KillaCore.Blazor.FileUpload</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
 
   <ItemGroup>
     <SupportedPlatform Include="browser" />
@@ -17,5 +37,20 @@
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.5" />
     <PackageReference Include="MimeTypesMap" Version="1.0.9" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="icon.png" Pack="true" PackagePath="\" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <Target Name="PublishNugetPackage" AfterTargets="Pack" Condition="'$(Configuration)'=='Release'">
+    <PropertyGroup>
+      <NuGetApiKey>$(NUGET_API_KEY)</NuGetApiKey>
+      <NuGetSource>https://api.nuget.org/v3/index.json</NuGetSource>
+      <PackageFile>$(BaseOutputPath)$(Configuration)\$(PackageId).$(PackageVersion).nupkg</PackageFile>
+    </PropertyGroup>
+    <Message Text="--- Pushing NuGet Package: $(PackageFile) ---" Importance="high" />
+    <Exec Command="dotnet nuget push &quot;$(PackageFile)&quot; --source &quot;$(NuGetSource)&quot; --api-key &quot;$(NuGetApiKey)&quot; --skip-duplicate" />
+  </Target>
 
 </Project>

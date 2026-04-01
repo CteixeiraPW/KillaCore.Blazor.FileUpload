@@ -7,7 +7,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 
 // 1. Register the backend API & security services (from your Server package)
-builder.Services.AddBlazorFileUpload<ApplicationUploadHooks>("TheirSuperSecretKey1234567890!");
+builder.Services.AddBlazorFileUpload<ApplicationUploadHooks>(builder.Configuration);
 
 // 2. Register the frontend UI services (from your Client package)
 // When the component renders on the server via SignalR, it needs an absolute URL to call its own API.

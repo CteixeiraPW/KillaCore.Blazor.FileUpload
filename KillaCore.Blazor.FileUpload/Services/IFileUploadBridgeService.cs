@@ -18,4 +18,7 @@ public interface IFileUploadBridgeService
     /// Returns FALSE if the ID was already used.
     /// </summary>
     bool RegisterUsedKey(string uniqueId);
+
+
+    bool TryRegisterBatchHash(string batchId, string fileHash);
 }

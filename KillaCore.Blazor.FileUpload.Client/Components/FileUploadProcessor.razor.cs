@@ -147,6 +147,26 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 continue;
             }
 
+            if (Options.EnabledFeatures.Contains(FileUploadFeature.VerifyLocalDuplicates))
+            {
+                // Look at the transfers we ALREADY accepted in this specific batch
+                bool isLocalDuplicate = _transfers.Any(t =>
+                    t.Id != model.Id && // Don't compare against itself
+                    t.Status == TransferStatus.Pending && // Only check against files we are actually going to upload
+                    t.FileName.Equals(file.Name, StringComparison.OrdinalIgnoreCase) &&
+                    t.FileSize == file.Size);
+
+                if (isLocalDuplicate)
+                {
+                    model.Status = TransferStatus.Skipped;
+                    model.StartTime = DateTime.UtcNow;
+                    model.EndTime = DateTime.UtcNow;
+                    model.StatusMessage = "Duplicate in batch";
+                    await FireEventAsync(EventNotificationType.FileSkipped, model, "Local duplicate detected");
+                    continue;
+                }
+            }
+
             if (acceptedCount >= Options.MaxFiles)
             {
                 model.Status = TransferStatus.Skipped;

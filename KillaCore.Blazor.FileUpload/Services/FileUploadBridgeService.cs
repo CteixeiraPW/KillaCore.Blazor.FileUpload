@@ -89,6 +89,27 @@ internal class FileUploadBridgeService(IMemoryCache cache) : IFileUploadBridgeSe
         return true;
     }
 
+    public bool TryRegisterBatchHash(string batchId, string fileHash)
+    {
+        if (string.IsNullOrEmpty(batchId) || string.IsNullOrEmpty(fileHash))
+            return true; // Skip check if data is missing
+
+        string cacheKey = $"batch_hashes_{batchId}";
+
+        // 1. Get or create a thread-safe dictionary for this specific Batch ID.
+        // We use IMemoryCache so it automatically deletes itself after an hour!
+        var hashSet = cache.GetOrCreate(cacheKey, entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1);
+            return new ConcurrentDictionary<string, byte>();
+        });
+
+        // 2. TryAdd returns FALSE if the hash already exists in the dictionary.
+        // This means another concurrent API request in this batch already uploaded it!
+        return hashSet!.TryAdd(fileHash, 1);
+    }
+
+
     private static void SafeDeleteFile(string path)
     {
         try

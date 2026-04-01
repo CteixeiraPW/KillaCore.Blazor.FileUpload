@@ -1,57 +1,250 @@
------
-
 # KillaCore.Blazor.FileUpload
 
-A robust, secure, and high-performance file upload solution for Blazor Server and Interactive Server applications. This library implements a **Producer-Consumer pipeline** to handle high-concurrency uploads while strictly separating network-bound operations (uploading) from CPU-bound operations (hashing, verification, and saving).
+A high-performance, secure, and modern file upload pipeline designed for Blazor Server, Blazor WebAssembly, and Blazor WebApp (Auto) applications. 
+
+This library solves the fundamental issue of Blazor SignalR message size limits by offloading the actual data transfer to a dedicated Javascript worker (`XMLHttpRequest`) and Web API pipeline. It strictly separates the UI state machine from server-side CPU-bound operations (hashing, duplicate verification, and disk saving), ensuring your Blazor UI remains highly responsive regardless of file size.
 
 ## 🚀 Key Features
 
-  * **Pipeline Architecture:** Decouples network I/O from file processing using `System.Threading.Channels`. \* **Smart Concurrency:** Configurable independent limits for concurrent network uploads vs. concurrent CPU processors.
-  * **End-to-End Security:**
-      * **HMAC SHA-256 Signed Tokens:** Prevents unauthorized API access and replay attacks.
-      * **Data Protection:** Encrypts file validation rules (MIME types) so they cannot be tampered with on the client.
-      * **Magic Number Inspection:** Server-side validation of file content headers (not just file extensions).
-  * **Resiliency:** Full support for `CancellationToken` propagation. Cancelling a batch immediately stops network requests, hashing operations, and database calls.
-  * **Lifecycle Management:** Tracks file states through `Pending` $\rightarrow$ `Uploading` $\rightarrow$ `Hashing` $\rightarrow$ `Verifying` $\rightarrow$ `Saving`.
-  * **Memory Efficient:** Implements strict disposal patterns to clean up `CancellationTokenSource` and temporary files automatically.
+* **Dual-Package Architecture:** Seamlessly supports .NET 10 Blazor WebApp Auto rendering modes by strictly separating Client UI logic from Server API logic.
+* **SignalR Bypass:** Transfers files directly to an API controller, completely preventing Blazor Server circuit disconnects and memory spikes.
+* **Multi-Tier Duplicate Detection:** Saves bandwidth and server resources by intelligently skipping identical files within the same batch using instant client-side heuristics and server-side SHA-256 cryptographic hashing.
+* **End-to-End Security:**
+  * **Anti-Replay Tokens:** Uses short-lived, one-time-use secure tokens to prevent unauthorized API access.
+  * **Encrypted Policies:** Uses `IDataProtection` to encrypt validation rules (like Allowed MIME types) so they cannot be tampered with on the client.
+  * **Magic Number Inspection:** Validates actual file content headers on the server, ensuring users cannot bypass security by renaming file extensions.
+* **Extensible Server Hooks:** A clean `IFileUploadServerHooks` interface allows you to execute custom logic (saving to DB, AWS S3, Azure Blob, or local disk) without altering the core pipeline.
+* **Resiliency & Cancellation:** Full support for `CancellationToken` propagation. Cancelling a batch in the UI immediately halts network requests and server-side saving operations.
+* **Orphan Cleanup Janitor:** Includes a lightweight, zero-impact BackgroundService that automatically sweeps the temporary storage folder to prevent disk exhaustion in the event of hard server crashes or IIS App Pool recycles.
 
------
+---
 
 ## 📦 Installation & Setup
 
-### 1\. Register Services
+Because this solution utilizes a secure Client-to-Server architecture, you must install the appropriate packages based on your Blazor hosting model.
 
-In your `Program.cs`, register the file upload services. You must provide a strong secret key (min 16 characters) for the HMAC security service.
+### 1. Install the NuGet Packages
 
-```csharp
-// Program.cs
-using KillaCore.Blazor.FileUpload.Extension;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// Register Blazor File Upload
-// The secret key is used to sign upload tokens securely.
-string uploadKey = builder.Configuration["FileUpload:SecretKey"] 
-                   ?? "Your-Super-Secure-Secret-Key-Here-Min-16-Chars";
-
-builder.Services.AddBlazorFileUpload(uploadKey);
-
-var app = builder.Build();
+**For the Server Project (API, Validation, Disk I/O):**
+```bash
+dotnet add package KillaCore.Blazor.FileUpload
 ```
 
-### 2\. Map Controllers
-
-Ensure your backend is set up to map controllers. The extension automatically registers the `UploadsController` assembly, but you must map the endpoints.
-
-```csharp
-app.MapControllers();
+**For the Client Project (UI Components, WASM, JS Interop):**
+```bash
+dotnet add package KillaCore.Blazor.FileUpload.Client
 ```
 
-### 3\. IIS / Reverse Proxy Configuration
+---
 
-By default, ASP.NET Core limits request bodies to \~30MB. To allow larger uploads, you must configure the request limits in `web.config` (if using IIS) or Kestrel.
+### 2. Register Services (`Program.cs`)
 
-**web.config (IIS):**
+Your setup depends on your Blazor hosting model. 
+
+#### Option A: Blazor WebApp (Auto Mode) OR Blazor WebAssembly (Hosted)
+* **Client Project `Program.cs`:** Register the client services so the UI can communicate with your API.
+    ```csharp
+    builder.Services.AddKillaCoreFileUploadClient();
+    ```
+* **Server Project `Program.cs`:** Register the server-side validation, caching, and API services. Also register the client services here if you are utilizing Server Prerendering.
+    ```csharp
+    // 1. Required for the UploadsController API
+    builder.Services.AddControllers();
+    
+    // 2. Register KillaCore Packages
+    builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);;
+    builder.Services.AddKillaCoreFileUploadClient(); // If prerendering Client components
+    
+    // 3. Register your custom server hooks (See Step 4)
+    builder.Services.AddScoped<IFileUploadServerHooks, ApplicationUploadHooks>();
+    ```
+
+#### Option B: Blazor Server (Interactive Server Only)
+Since everything runs on one machine, register everything in your single `Program.cs`:
+```csharp
+builder.Services.AddControllers();
+
+builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);;
+builder.Services.AddKillaCoreFileUploadClient();
+
+builder.Services.AddScoped<IFileUploadServerHooks, ApplicationUploadHooks>();
+```
+
+### 3. Map the Controllers (Server Project)
+Ensure your backend is set up to route requests to the package's internal `UploadsController`.
+```csharp
+app.MapControllers(); // Ensure this is before app.Run()
+```
+
+### 4. Configure `appsettings.json` (Server Project)
+You must define a secure key for generating Anti-Replay tokens, and optionally specify where temporary files should be stored during the upload process.
+
+```json
+{
+  "KillaCoreFileUpload": {
+    "SecretKey": "Your-Super-Secure-Secret-Key-Min-16-Chars",
+    "TempFolder": "KillaCoreUploads" 
+  }
+}
+```
+*Note: If `TempFolder` is just a name, it will be placed in the OS temp directory. You can also provide an absolute path like `D:\TempUploads`.*
+
+---
+
+### 4. Implement Server Hooks (Your Custom Logic)
+
+The package handles the networking, validation, and temporary file creation automatically. However, **you** must tell the application what to do with the files once they safely reach your server.
+
+In your **Server Project**, create a class that implements `IFileUploadServerHooks`:
+
+```csharp
+using KillaCore.Blazor.FileUpload.Services;
+using KillaCore.Blazor.FileUpload.Client.Models;
+
+public class ApplicationUploadHooks : IFileUploadServerHooks
+{
+    // 1. Check if the file already exists (Optional)
+    public Task<bool> CheckRemoteDuplicateAsync(string detectedHash, CancellationToken ct)
+    {
+        // Example: bool exists = _dbContext.Files.Any(f => f.Hash == detectedHash);
+        return Task.FromResult(false); 
+    }
+
+    // 2. Save the file to your permanent storage
+    public async Task SaveFileAsync(FileTransferData data, Stream fileStream, CancellationToken ct)
+    {
+        string safeName = $"{Guid.NewGuid():N}{Path.GetExtension(data.FileName)}";
+        string path = Path.Combine("C:\\SecureUploads", safeName);
+
+        await using var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write);
+        
+        // Pass the CancellationToken to support immediate UI cancellation!
+        await fileStream.CopyToAsync(fs, ct);
+
+        // Map your database ID back to the model so the Blazor UI Client knows about it
+        data.FinalResourceId = safeName; 
+    }
+
+    // 3. Fire logic when the whole batch finishes (Emails, Database updates, etc.)
+    public Task OnBatchCompletedAsync(string batchId, IReadOnlyList<FileTransferData> files)
+    {
+        int successCount = files.Count(f => f.Status == TransferStatus.Completed);
+        Console.WriteLine($"Batch {batchId} finished. {successCount} files saved successfully.");
+        return Task.CompletedTask;
+    }
+}
+```
+
+---
+
+## 💻 Usage Example (The UI Component)
+
+You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` files). The component operates in a "headless" state-machine style, giving you full control over how you render the progress bars.
+
+```razor
+@page "/upload"
+@using KillaCore.Blazor.FileUpload.Client.Components
+@using KillaCore.Blazor.FileUpload.Client.Models
+
+<h3>Secure File Processor</h3>
+
+<div class="mb-3">
+    <InputFile id="myFileInput" OnChange="HandleInputOnChange" multiple class="form-control" />
+</div>
+
+@if (_processor?.Transfers.Any() == true)
+{
+    <ul class="list-group mb-3">
+        @foreach (var file in _processor.Transfers)
+        {
+            <li class="list-group-item">
+                <div class="d-flex justify-content-between">
+                    <strong>@file.FileName</strong>
+                    <span class="badge bg-secondary">@file.Status.ToString()</span>
+                </div>
+                
+                <div class="progress mt-2" style="height: 20px;">
+                    <div class="progress-bar @(file.IsFinished ? "bg-success" : "progress-bar-animated progress-bar-striped")" 
+                         style="width: @(file.LifecyclePercent)%;">
+                        @file.LifecyclePercent.ToString("0")%
+                    </div>
+                </div>
+                <small class="text-muted">@file.StatusMessage</small>
+            </li>
+        }
+    </ul>
+    
+    @if (!_processor.Transfers.All(x => x.IsFinished))
+    {
+        <button class="btn btn-danger" @onclick="() => _processor.CancelAllAsync()">Cancel Batch</button>
+    }
+    else
+    {
+        <button class="btn btn-secondary" @onclick="() => _processor.Clear()">Clear List</button>
+    }
+}
+
+<FileUploadProcessor @ref="_processor"
+                     InputSelector="#myFileInput"
+                     Options="_options"
+                     UserId="@CurrentUserId"
+                     OnEvent="HandleUploadEvent" />
+
+@code {
+    private FileUploadProcessor _processor = default!;
+    private string CurrentUserId = "User-123"; // Retrieve from auth state
+
+    // Configure specific limits and features
+    private readonly FileProcessingOptions _options = new()
+    {
+        MaxFiles = 5,
+        MaxSizeFileBytes = 1024 * 1024 * 500, // 500 MB limit
+        MaxConcurrentUploads = 2,             // Throttle network connections
+        AllowedMimeTypes = ["image/jpeg", "image/png", "application/pdf"],
+        EnabledFeatures = [
+            FileUploadFeature.VerifyLocalDuplicates, 
+            FileUploadFeature.VerifyRemoteDuplicates, 
+            FileUploadFeature.SaveToServer
+        ]
+    };
+
+    private async Task HandleInputOnChange(InputFileChangeEventArgs e)
+    {
+        // Pass the files to the processor to begin the pipeline
+        var files = e.GetMultipleFiles(_options.MaxFiles).ToList();
+        if (_processor != null)
+        {
+            await _processor.ProcessInputFiles(files);
+        }
+    }
+
+    // Callback: Update UI when the Javascript worker reports progress
+    private void HandleUploadEvent(FileNotificationEvent notification)
+    {
+        StateHasChanged();
+    }
+}
+```
+
+---
+
+## ⚙️ Configuration (`FileProcessingOptions`)
+
+| Property | Default | Description |
+| :--- | :--- | :--- |
+| `MaxFiles` | `10` | Maximum number of files allowed in a single batch selection. |
+| `MaxSizeFileBytes` | `50 MB` | Hard size limit per file. Validated instantly on the client. |
+| `AllowedMimeTypes` | `*` (Any) | List of allowed MIME types. Sent securely as an encrypted policy. |
+| `MaxConcurrentUploads` | `5` | Throttle limit for how many parallel XHR network requests are executed. |
+| `EnabledFeatures` | All | Toggle `VerifyLocalDuplicates`, `VerifyRemoteDuplicates`, or `SaveToServer` flags. |
+
+---
+
+## ⚠️ Important Production Considerations
+
+### IIS & Web Server Request Limits
+By default, ASP.NET Kestrel and IIS block HTTP POST requests larger than **30MB**. Even though this component supports 500MB+ configurations, your web server will reject the request with a `413 Payload Too Large` error before it ever reaches the `UploadsController`.
+* **IIS (`web.config`):** You must increase the `maxAllowedContentLength`.
 
 ```xml
 <security>
@@ -60,173 +253,11 @@ By default, ASP.NET Core limits request bodies to \~30MB. To allow larger upload
   </requestFiltering>
 </security>
 ```
+* **Kestrel (`Program.cs`):** You must configure `MaxRequestBodySize` on the Kestrel server options.
 
------
+### Web Farms & Docker Swarm
+This package relies on `IDataProtectionProvider` to encrypt upload policies. If you deploy your API across multiple servers or load balancers, you **must** configure a centralized Data Protection key ring (e.g., storing keys in Redis, Azure Blob Storage, or a shared network folder). If Server A encrypts the policy and the Load Balancer routes the file transfer to Server B, the upload will fail with a `CryptographicException` if Server B does not share the same decryption key.
 
-## 💻 Usage Example
-
-Here is a complete example of a Blazor page that handles multiple file uploads, displays a progress bar, and saves the files to disk.
-
-```razor
-@page "/upload"
-@using KillaCore.Blazor.FileUpload.Components
-@using KillaCore.Blazor.FileUpload.Models
-@using System.IO
-
-<h3>Secure File Processor</h3>
-
-<div class="mb-3">
-    <InputFile id="myFileInput" OnChange="HandleInputOnChange" multiple class="form-control" />
-</div>
-
-<div class="mb-3">
-    <button class="btn btn-danger" @onclick="CancelAll" disabled="@(!_isUploading)">
-        Cancel All
-    </button>
-</div>
-
-@foreach (var file in _processor?.Transfers ?? Enumerable.Empty<FileTransferData>())
-{
-    <div class="card mb-2">
-        <div class="card-body p-2">
-            <div class="d-flex justify-content-between">
-                <span>@file.FileName (@(file.FileSize / 1024) KB)</span>
-                <span>@file.Status - @file.StageProgressPercent.ToString("F0")%</span>
-            </div>
-            
-            <div class="progress" style="height: 5px;">
-                <div class="progress-bar" role="progressbar" 
-                     style="width: @(file.LifecyclePercent)%"></div>
-            </div>
-            
-            @if (file.Status == TransferStatus.Failed)
-            {
-                <small class="text-danger">Error: @file.StatusMessage</small>
-            }
-        </div>
-    </div>
-}
-
-<FileUploadProcessor @ref="_processor"
-                     InputSelector="#myFileInput"
-                     Options="_options"
-                     UserId="@CurrentUserId"
-                     OnEvent="HandleUploadEvent"
-                     OnFileServerUpload="SaveFileToDisk"
-                     OnVerifyRemoteDuplicate="CheckRemoteDuplicate" 
-                     OnFilesUploadCompleted="HandleBatchCompleted" />
-
-@code {
-    private FileUploadProcessor? _processor;
-    private bool _isUploading => _processor?.Transfers.Any(t => !t.IsFinished) ?? false;
-    private string CurrentUserId = "User-123"; // Retrieve from auth state
-
-    // Configure specific limits and features
-    private FileProcessingOptions _options = new()
-    {
-        MaxFiles = 10,
-        MaxSizeFileBytes = 50 * 1024 * 1024, // 50 MB
-        MaxConcurrentUploads = 3,            // Network throttle
-        MaxConcurrentProcessors = 2,         // CPU throttle
-        EnabledFeatures = new HashSet<FileUploadFeature> 
-        { 
-            FileUploadFeature.VerifyRemoteDuplicates, 
-            FileUploadFeature.SaveToServer 
-        }
-    };
-
-    private async Task HandleInputOnChange(InputFileChangeEventArgs e)
-    {
-        // Pass the files to the processor to begin the pipeline
-        var files = e.GetMultipleFiles(_options.MaxFiles);
-        await _processor!.ProcessInputFiles(files);
-    }
-
-    private async Task CancelAll()
-    {
-        await _processor!.CancelAllAsync();
-    }
-
-    // Callback: Update UI when progress changes
-    private void HandleUploadEvent(FileNotificationEvent e)
-    {
-        StateHasChanged();
-    }
-
-    // Callback: Check if file exists (Optional)
-    // Note: Accepts CancellationToken to support immediate stopping
-    private async Task<bool> CheckRemoteDuplicate(FileTransferData data, CancellationToken ct)
-    {
-        // Example: Check your DB using data.DetectedHash
-        await Task.Delay(100, ct); 
-        return false; // Return true to skip upload
-    }
-
-    // Callback: Save the file (Optional)
-    // The stream provides read access to the temp file on the server
-    private async Task SaveFileToDisk(FileTransferData data, Stream stream, CancellationToken ct)
-    {
-        var path = Path.Combine("C:\\Uploads", data.FileName);
-        
-        // Use the token to ensure we stop writing if the user cancels
-        using var fs = new FileStream(path, FileMode.Create);
-        await stream.CopyToAsync(fs, ct);
-    }
-
-    // Callback: Fires when the entire batch is finished
-    private Task HandleBatchCompleted(IReadOnlyList<FileTransferData> files, string batchId)
-    {
-        Console.WriteLine($"Batch {batchId} finished. Processed {files.Count} files.");
-        return Task.CompletedTask;
-    }
-}
-```
-
------
-
-## ⚙️ Configuration (`FileProcessingOptions`)
-
-| Property | Default | Description |
-| :--- | :--- | :--- |
-| `UploadEndpointUrl` | `api/uploads/temp` | The controller route for the initial raw upload. |
-| `MaxFiles` | `10` | Maximum number of files allowed in a single batch. |
-| `MaxSizeFileBytes` | `50 MB` | Hard limit per file. Checked on Client and Server. |
-| `AllowedMimeTypes` | Common Images/Docs | List of allowed MIME types. Sent as an **encrypted** policy header. |
-| `MaxConcurrentUploads` | `5` | How many files to upload over the network simultaneously. |
-| `MaxConcurrentProcessors`| `2` | How many files to hash/save simultaneously (CPU bound). |
-| `EnabledFeatures` | All | Toggle `VerifyLocalDuplicates`, `VerifyRemoteDuplicates`, or `SaveToServer`. |
-
------
-
-## 🔐 Security Architecture
-
-This library employs a **Signed Token Pattern** to secure the upload endpoint.
-
-1.  **Token Generation:** When an upload begins, the Blazor Server component generates a token containing `FileId`, `UserId`, `Expiration`, and a `HMACSHA256` signature.
-2.  **Encrypted Policy:** The allowed MIME types are encrypted server-side using `IDataProtectionProvider` and sent to the client. The client echoes this back to the API, ensuring the user cannot tamper with allowed file types in JavaScript.
-3.  **API Validation:** The `UploadsController` validates the token signature and decrypts the policy before accepting any bytes.
-4.  **Content Inspection:** The server inspects the file's "Magic Numbers" (file signature) to verify the actual content matches the extension.
-
------
-
-## 🏗️ Architecture
-
-The `FileUploadProcessor` handles files in two distinct stages to optimize server resources:
-
-1.  **Stage 1: Network Producer**
-
-      * Uploads files to a temporary location via `UploadsController`.
-      * Concurrency is limited by `MaxConcurrentUploads` to prevent saturating the bandwidth.
-      * Pushes successful upload tokens to a `Channel<ProcessingJob>`.
-
-2.  **Stage 2: CPU Consumer**
-
-      * Reads from the Channel.
-      * Claims the temporary file from the `FileUploadBridgeService`.
-      * Calculates SHA-256 Hash (CPU intensive).
-      * Executes the `OnFileUploadCompleted` callback.
-      * Concurrency is limited by `MaxConcurrentProcessors` to prevent thread starvation.
-
+---
 ## 📄 License
-
-MIT License. See [LICENSE.txt](https://www.google.com/search?q=LICENSE.txt) for more information.
+MIT License.

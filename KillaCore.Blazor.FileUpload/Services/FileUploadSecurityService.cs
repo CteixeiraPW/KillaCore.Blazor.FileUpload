@@ -1,4 +1,6 @@
-﻿using System.Security.Cryptography;
+﻿using KillaCore.Blazor.FileUpload.Models;
+using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace KillaCore.Blazor.FileUpload.Services;
@@ -8,15 +10,15 @@ internal class HmacFileUploadSecurityService : IFileUploadSecurityService
     private readonly byte[] _secretKeyBytes;
     private readonly TimeSpan _tokenLifespan = TimeSpan.FromMinutes(5);
 
-    // Constructor accepts the key as a string (e.g., from appsettings.json)
-    public HmacFileUploadSecurityService(string secretKey)
+    // Constructor accepts the key securely via the Options pattern
+    public HmacFileUploadSecurityService(IOptions<FileUploadServerOptions> options)
     {
-        if (string.IsNullOrWhiteSpace(secretKey))
-            throw new ArgumentException("Secret key cannot be empty", nameof(secretKey));
+        var secretKey = options.Value.SecretKey;
 
-        // Ensure the key is at least somewhat secure length-wise
-        if (secretKey.Length < 16)
-            throw new ArgumentException("Secret key must be at least 16 characters long for security.");
+        if (string.IsNullOrWhiteSpace(secretKey) || secretKey.Length < 16)
+        {
+            throw new ArgumentException("KillaCoreFileUpload:SecretKey must be defined in appsettings.json and be at least 16 characters long.");
+        }
 
         _secretKeyBytes = Encoding.UTF8.GetBytes(secretKey);
     }
@@ -47,7 +49,6 @@ internal class HmacFileUploadSecurityService : IFileUploadSecurityService
         try
         {
             // 1. Decode
-            // Try/Catch handles invalid Base64 strings
             var decodedString = Encoding.UTF8.GetString(Convert.FromBase64String(token));
             var parts = decodedString.Split(':');
 
@@ -61,7 +62,6 @@ internal class HmacFileUploadSecurityService : IFileUploadSecurityService
             var providedSignature = parts[3];
 
             // 2. Check Ownership (Prevent User A from using User B's token)
-            // Note: If expectedUserId is null (anonymous), skip this check or enforce it based on requirements
             if (!string.Equals(uId, expectedUserId, StringComparison.OrdinalIgnoreCase))
                 return false;
 
@@ -74,12 +74,15 @@ internal class HmacFileUploadSecurityService : IFileUploadSecurityService
                 return false; // Expired
 
             // 4. Verify Signature (The most critical step)
-            // Reconstruct the payload exactly as it was generated
             var payloadToVerify = $"{fId}:{uId}:{expString}";
             var computedSignature = ComputeSignature(payloadToVerify);
 
-            // Secure string comparison to prevent timing attacks
-            if (FixedTimeEquals(computedSignature, providedSignature))
+            // Convert to ReadOnlySpan<byte> for the built-in Crypto API
+            var computedBytes = Encoding.UTF8.GetBytes(computedSignature);
+            var providedBytes = Encoding.UTF8.GetBytes(providedSignature);
+
+            // --- CHANGED: Use the highly optimized .NET built-in method to prevent timing attacks ---
+            if (CryptographicOperations.FixedTimeEquals(computedBytes, providedBytes))
             {
                 fileId = fId;
                 return true;
@@ -87,7 +90,7 @@ internal class HmacFileUploadSecurityService : IFileUploadSecurityService
         }
         catch
         {
-            // Logging can be added here
+            // Invalid Base64 or corrupted token format
             return false;
         }
 
@@ -99,18 +102,5 @@ internal class HmacFileUploadSecurityService : IFileUploadSecurityService
         using var hmac = new HMACSHA256(_secretKeyBytes);
         var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(payload));
         return Convert.ToBase64String(hashBytes);
-    }
-
-    // Prevents timing attacks by comparing all characters before returning
-    private static bool FixedTimeEquals(string left, string right)
-    {
-        if (left.Length != right.Length) return false;
-
-        int result = 0;
-        for (int i = 0; i < left.Length; i++)
-        {
-            result |= left[i] ^ right[i];
-        }
-        return result == 0;
     }
 }

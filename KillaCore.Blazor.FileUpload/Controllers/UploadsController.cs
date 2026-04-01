@@ -1,12 +1,14 @@
 ﻿using FileSignatures;
 using HeyRed.Mime;
 using KillaCore.Blazor.FileUpload.Client.Models;
+using KillaCore.Blazor.FileUpload.Models;
 using KillaCore.Blazor.FileUpload.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace KillaCore.Blazor.FileUpload.Controllers;
 
@@ -17,7 +19,8 @@ public sealed class UploadsController(
     IFileUploadBridgeService bridge,         // 2. Inject the Bridge
     IFileFormatInspector inspector,    // 3. Inject the Magic Number Inspector
     IDataProtectionProvider dpProvider, // 4. Data Protection Provider
-    IServiceProvider serviceProvider   // 5. Inject Service Provider for Optional Hooks
+    IServiceProvider serviceProvider,   // 5. Inject Service Provider for Optional Hooks
+    IOptions<FileUploadServerOptions> options
     ) : ControllerBase
 {
     [HttpPost("policy")]
@@ -136,7 +139,12 @@ public sealed class UploadsController(
         }
 
         // --- STEP 4: SAVE TO DISK (Standard Logic) ---
-        var tempRoot = Path.Combine(Path.GetTempPath(), "KillaCoreUploads");
+        string folderConfig = options.Value.TempFolder;
+        if (string.IsNullOrWhiteSpace(folderConfig)) folderConfig = "KillaCoreUploads";
+
+        var tempRoot = Path.IsPathRooted(folderConfig)
+            ? folderConfig
+            : Path.Combine(Path.GetTempPath(), folderConfig);
 
         Directory.CreateDirectory(tempRoot);
         var tempId = $"{Guid.NewGuid():N}.tmp";
@@ -190,6 +198,14 @@ public sealed class UploadsController(
                 // Now this will ALWAYS fire because DetectedHash is populated!
                 if (model.DetectedHash != null)
                 {
+
+                    if (!bridge.TryRegisterBatchHash(clientBatchId, model.DetectedHash))
+                    {
+                        // Delete the temp file immediately and fail the upload
+                        TryDelete(tempPath);
+                        return BadRequest("Identical file content already uploaded in this batch.");
+                    }
+
                     isDuplicate = await hooks.CheckRemoteDuplicateAsync(model.DetectedHash, ct);
                 }
 

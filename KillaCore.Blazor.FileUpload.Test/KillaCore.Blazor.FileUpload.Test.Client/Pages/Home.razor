@@ -77,9 +77,11 @@
         MaxFiles = 5,
         MaxSizeFileBytes = 1024 * 1024 * 500, // 500 MB limit
         MaxConcurrentUploads = 2,             // Upload 2 files at a time
-        UploadEndpointUrl = "api/uploads/temp", // Point to the Controller
         AllowedMimeTypes = ["image/jpeg", "image/png", "application/pdf"],
-        EnabledFeatures = [FileUploadFeature.SaveToServer, FileUploadFeature.VerifyRemoteDuplicates]
+        EnabledFeatures = [
+            FileUploadFeature.SaveToServer,
+            FileUploadFeature.VerifyLocalDuplicates,
+            FileUploadFeature.VerifyRemoteDuplicates]
     };
 
     // Fired when the user clicks "Browse..." and picks files
