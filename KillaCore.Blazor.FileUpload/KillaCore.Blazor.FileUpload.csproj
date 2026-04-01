@@ -46,10 +46,6 @@
 	</ItemGroup>
 	
 	<ItemGroup>
-	  <Folder Include="wwwroot\" />
-	</ItemGroup>
-	
-	<ItemGroup>
 	  <ProjectReference Include="..\KillaCore.Blazor.FileUpload.Client\KillaCore.Blazor.FileUpload.Client.csproj" />
 	</ItemGroup>
 
