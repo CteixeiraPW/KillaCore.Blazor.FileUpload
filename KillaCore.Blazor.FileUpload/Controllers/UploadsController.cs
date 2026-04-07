@@ -16,7 +16,7 @@ namespace KillaCore.Blazor.FileUpload.Controllers;
 [Route("api/uploads")]
 public sealed class UploadsController(
     IFileUploadSecurityService securityService, // 1. Inject Security
-    IFileUploadBridgeService bridge,         // 2. Inject the Bridge
+    IBatchDuplicateTracker duplicateTracker, // 2. Inject the Batch Duplicate Tracker
     IFileFormatInspector inspector,    // 3. Inject the Magic Number Inspector
     IDataProtectionProvider dpProvider, // 4. Data Protection Provider
     IServiceProvider serviceProvider,   // 5. Inject Service Provider for Optional Hooks
@@ -56,16 +56,10 @@ public sealed class UploadsController(
         return Ok();
     }
 
-    [HttpGet("test")]
-    public async Task<IActionResult> Test()
-    {
-        return Ok("test");
-    }
-
     // List of extensions that do not have "Magic Numbers" and must be validated by content
     private static readonly HashSet<string> _textExtensions = [".txt", ".md", ".markdown", ".json", ".csv", ".xml", ".html", ".css", ".js"];
 
-    [AllowAnonymous] // We allow anonymous because we rely on the Token
+    [AllowAnonymous]
     [HttpPost("temp")]
     [RequestSizeLimit(1024 * 1024 * 500)]
     public async Task<IActionResult> UploadTemp([FromForm] IFormFile file, CancellationToken ct)
@@ -80,24 +74,18 @@ public sealed class UploadsController(
         HashSet<string>? allowedMimeTypes = null;
         try
         {
-            // A. Create the Protector using the EXACT same purpose string as your Blazor Component
             var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY);
-
-            // B. Decrypt the rules (e.g., "jpg,png,pdf")
             string decryptedRules = protector.Unprotect(policyHeader.ToString());
 
-            // C. Create a fast lookup set (Normalize to lowercase, remove dots)
-            // Handle Wildcard "*"
             if (decryptedRules != "*")
             {
                 allowedMimeTypes = [.. decryptedRules
-                    .Split(',', StringSplitOptions.RemoveEmptyEntries)
-                    .Select(x => x.Trim().ToLowerInvariant())];
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim().ToLowerInvariant())];
             }
         }
         catch (System.Security.Cryptography.CryptographicException)
         {
-            // This means the token was tampered with or created by a different server key
             return BadRequest("Invalid security policy.");
         }
 
@@ -112,7 +100,8 @@ public sealed class UploadsController(
         if (!securityService.ValidateToken(secureToken, userId, out _))
             return Unauthorized("Invalid or expired token.");
 
-        if (!bridge.RegisterUsedKey(secureToken))
+        // UPDATED: Using the new tracker for Anti-Replay!
+        if (!duplicateTracker.RegisterUsedToken(secureToken))
             return BadRequest("This upload token has already been used.");
 
         // --- STEP 3: CONTENT INSPECTION (The "Is it Real?" check) ---
@@ -123,9 +112,6 @@ public sealed class UploadsController(
 
         using (var streamCheck = file.OpenReadStream())
         {
-            // [LOGIC SWITCH]
-            // If it is a text file, we validate UTF8 content.
-            // If it is binary, we validate Magic Numbers (Signature).
             if (_textExtensions.Contains(userExtension))
             {
                 var (IsValid, Error) = ValidateTextFile(streamCheck, userExtension, allowedMimeTypes);
@@ -163,17 +149,19 @@ public sealed class UploadsController(
 
         // --- STEP 5: HANDOVER & EXECUTE HOOKS ---
         var handoffToken = Guid.NewGuid().ToString("N");
-        var hooks = serviceProvider.GetService<IFileUploadServerHooks>();
+        string uploadContext = Request.Headers["X-Upload-Context"].FirstOrDefault() ?? "Default";
+
+        IFileUploadServerHooks? hooks = serviceProvider.GetKeyedService<IFileUploadServerHooks>(uploadContext);
+        hooks ??= serviceProvider.GetService<IFileUploadServerHooks>();
+
         string? finalId = null;
 
         if (hooks != null)
         {
-            // 1. Read the BatchId sent from Javascript
             string clientBatchId = Request.Headers.TryGetValue("X-Batch-Id", out var bId)
                 ? bId.ToString()
                 : string.Empty;
 
-            // Rebuild a basic FileTransferData model for the backend to use
             var model = new FileTransferData
             {
                 Id = handoffToken,
@@ -185,7 +173,6 @@ public sealed class UploadsController(
 
             try
             {
-                // 2. CALCULATE THE HASH (So CheckRemoteDuplicateAsync actually runs)
                 using (var hashStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read))
                 using (var sha256 = System.Security.Cryptography.SHA256.Create())
                 {
@@ -195,13 +182,11 @@ public sealed class UploadsController(
 
                 bool isDuplicate = false;
 
-                // Now this will ALWAYS fire because DetectedHash is populated!
                 if (model.DetectedHash != null)
                 {
-
-                    if (!bridge.TryRegisterBatchHash(clientBatchId, model.DetectedHash))
+                    // UPDATED: Using the new tracker!
+                    if (!duplicateTracker.TryRegisterBatchHash(clientBatchId, model.DetectedHash))
                     {
-                        // Delete the temp file immediately and fail the upload
                         TryDelete(tempPath);
                         return BadRequest("Identical file content already uploaded in this batch.");
                     }
@@ -211,37 +196,31 @@ public sealed class UploadsController(
 
                 if (!isDuplicate)
                 {
-                    // Save the File
                     await using var finalStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
                     await hooks.SaveFileAsync(model, finalStream, ct);
-
-                    // Capture the final DB ID set by the developer's hook
                     finalId = model.FinalResourceId;
                 }
                 else
                 {
-                    // Tell the UI that it was rejected as a duplicate
                     return BadRequest("File is a remote duplicate.");
                 }
             }
             catch (Exception ex)
             {
-                // Surface the developer's error directly to the UI's StatusMessage
                 return BadRequest($"Server processing error: {ex.Message}");
             }
             finally
             {
-                // Clean up the temp file after the developer's hook is done saving it
                 TryDelete(tempPath);
             }
         }
         else
         {
-            // Only bridge the file into memory if there are no hooks to handle it immediately
-            bridge.RegisterFile(handoffToken, tempPath);
+            // --- CLEANED UP: FAIL FAST MECHANISM ---
+            TryDelete(tempPath);
+            return StatusCode(500, $"Configuration Error: No IFileUploadServerHooks implementation was registered for context '{uploadContext}'. Please register it in Program.cs.");
         }
 
-        // Return the finalId so the Blazor Client can link the file to the DB record
         return Ok(new { token = handoffToken, size = file.Length, finalId });
     }
 

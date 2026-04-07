@@ -5,6 +5,9 @@ public sealed class FileProcessingOptions
     // --- Endpoints ---
     public string UploadEndpointUrl { get; } = "api/uploads/temp";
 
+    // Identifies which server hook should handle this upload. Defaults to "Default".
+    public string UploadContext { get; set; } = "Default";
+
     // ✅ SAFE: The user can ONLY add valid features here.
     // They cannot add "Uploading" or "Hashing" because the enum doesn't have them.
     public HashSet<FileUploadFeature> EnabledFeatures { get; set; } =

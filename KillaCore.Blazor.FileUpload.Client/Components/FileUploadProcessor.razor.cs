@@ -271,7 +271,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                             uploadToken,
                             FileUploadConstants.TOKEN_HEADER_NAME,
                             _policyToken,
-                            FileUploadConstants.POLICY_HEADER_NAME
+                            FileUploadConstants.POLICY_HEADER_NAME,
+                            Options.UploadContext
                             );
 
                         if (response != null && !string.IsNullOrEmpty(response.Token))

@@ -18,7 +18,8 @@ export function uploadFile(
     uploadToken,
     tokenHeaderName,
     policyToken,
-    policyHeaderName
+    policyHeaderName,
+    uploadContext
 ) {
     return new Promise((resolve, reject) => {
         const input = document.querySelector(inputSelector);
@@ -39,6 +40,10 @@ export function uploadFile(
         xhr.setRequestHeader(policyHeaderName, policyToken);
         xhr.setRequestHeader("X-Batch-Id", batchId);
         xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+
+        if (uploadContext) {
+            xhr.setRequestHeader("X-Upload-Context", uploadContext);
+        }
 
         // --- Progress Reporting (Unchanged) ---
         let lastReportTime = 0;

@@ -16,7 +16,8 @@ This library solves the fundamental issue of Blazor SignalR message size limits 
 * **Extensible Server Hooks:** A clean `IFileUploadServerHooks` interface allows you to execute custom logic (saving to DB, AWS S3, Azure Blob, or local disk) without altering the core pipeline.
 * **Resiliency & Cancellation:** Full support for `CancellationToken` propagation. Cancelling a batch in the UI immediately halts network requests and server-side saving operations.
 * **Orphan Cleanup Janitor:** Includes a lightweight, zero-impact BackgroundService that automatically sweeps the temporary storage folder to prevent disk exhaustion in the event of hard server crashes or IIS App Pool recycles.
-
+* **Extensible Server Hooks:** A clean `IFileUploadServerHooks` interface allows you to execute custom logic (saving to DB, AWS S3, Azure Blob, or local disk) without altering the core pipeline.
+  * **Dynamic Hook Routing:** Leverages modern .NET Keyed Dependency Injection, allowing you to register multiple unique upload behaviors (e.g., "ProfilePictures" vs "Invoices") in the same app and route them effortlessly from the UI.
 ---
 
 ## 📦 Installation & Setup
@@ -55,8 +56,14 @@ Your setup depends on your Blazor hosting model.
     builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);;
     builder.Services.AddKillaCoreFileUploadClient(); // If prerendering Client components
     
-    // 3. Register your custom server hooks (See Step 4)
+    // 3. Register your custom server hooks using Keyed DI!
     builder.Services.AddScoped<IFileUploadServerHooks, ApplicationUploadHooks>();
+    
+    // The string key tells the server which logic to execute based on the UI's context.
+    // Example: You can register as many different hooks as your app needs!
+    // builder.Services.AddKeyedScoped<IFileUploadServerHooks, ApplicationUploadHooks>("Default");
+    // builder.Services.AddKeyedScoped<IFileUploadServerHooks, ProfilePictureHooks>("ProfileImages");
+    // builder.Services.AddKeyedScoped<IFileUploadServerHooks, InvoiceHooks>("Invoices");
     ```
 
 #### Option B: Blazor Server (Interactive Server Only)
@@ -205,7 +212,8 @@ You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` f
             FileUploadFeature.VerifyLocalDuplicates, 
             FileUploadFeature.VerifyRemoteDuplicates, 
             FileUploadFeature.SaveToServer
-        ]
+        ],
+        UploadContext = "Default" // Must match the string used in AddKeyedScoped!
     };
 
     private async Task HandleInputOnChange(InputFileChangeEventArgs e)
@@ -232,6 +240,7 @@ You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` f
 
 | Property | Default | Description |
 | :--- | :--- | :--- |
+| `UploadContext` | `"Default"` | The string key used by the API to resolve the specific `IFileUploadServerHooks` implementation via Keyed DI. |
 | `MaxFiles` | `10` | Maximum number of files allowed in a single batch selection. |
 | `MaxSizeFileBytes` | `50 MB` | Hard size limit per file. Validated instantly on the client. |
 | `AllowedMimeTypes` | `*` (Any) | List of allowed MIME types. Sent securely as an encrypted policy. |

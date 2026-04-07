@@ -1,5 +1,6 @@
 using KillaCore.Blazor.FileUpload.Client.Extension;
 using KillaCore.Blazor.FileUpload.Extension;
+using KillaCore.Blazor.FileUpload.Services;
 using KillaCore.Blazor.FileUpload.Test.Components;
 using KillaCore.Blazor.FileUpload.Test.Services;
 
@@ -7,9 +8,12 @@ var builder = WebApplication.CreateBuilder(args);
 
 
 // 1. Register the backend API & security services (from your Server package)
-builder.Services.AddBlazorFileUpload<ApplicationUploadHooks>(builder.Configuration);
+builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);
 
-// 2. Register the frontend UI services (from your Client package)
+// 2. Register the DEFAULT hook (Fallback if no X-Upload-Context header is sent)
+builder.Services.AddKeyedScoped<IFileUploadServerHooks, ApplicationUploadHooks>("TestUpload");
+
+// 3. Register the frontend UI services (from your Client package)
 // When the component renders on the server via SignalR, it needs an absolute URL to call its own API.
 builder.Services.AddBlazorFileUploadClient();
 
