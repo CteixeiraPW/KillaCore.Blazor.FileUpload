@@ -11,7 +11,7 @@
     <Description>The client-side UI components and WebAssembly/Auto support for the KillaCore.Blazor.FileUpload pipeline.</Description>
     <Authors>Carlos Teixeira</Authors>
     <Company>KillaCore</Company>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
     <Configurations>Debug;Release</Configurations>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -32,9 +32,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="10.0.5" />
-    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.5" />
-    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.5" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="10.0.7" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.7" />
     <PackageReference Include="MimeTypesMap" Version="1.0.9" />
   </ItemGroup>
 

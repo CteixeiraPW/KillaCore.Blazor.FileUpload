@@ -10,7 +10,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\KillaCore.Blazor.FileUpload\KillaCore.Blazor.FileUpload.csproj" />
     <ProjectReference Include="..\KillaCore.Blazor.FileUpload.Test.Client\KillaCore.Blazor.FileUpload.Test.Client.csproj" />
-    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="10.0.5" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="10.0.7" />
   </ItemGroup>
 
   <ItemGroup>
