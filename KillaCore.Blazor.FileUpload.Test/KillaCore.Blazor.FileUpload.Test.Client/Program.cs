@@ -3,6 +3,6 @@ using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
 
-builder.Services.AddBlazorFileUploadClient();
+builder.Services.AddKillaCoreFileUploadClient();
 
 await builder.Build().RunAsync();

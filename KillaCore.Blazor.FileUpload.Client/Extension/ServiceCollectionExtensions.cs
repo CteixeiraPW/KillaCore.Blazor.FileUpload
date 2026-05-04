@@ -8,7 +8,7 @@ public static class ServiceCollectionExtensions
     /// <summary>
     /// Registers the File Upload Client services and configures the HttpClient needed to communicate with the Server API.
     /// </summary>
-    public static IServiceCollection AddBlazorFileUploadClient(
+    public static IServiceCollection AddKillaCoreFileUploadClient(
         this IServiceCollection services,
         Action<HttpClient>? configureClient = null)
     {

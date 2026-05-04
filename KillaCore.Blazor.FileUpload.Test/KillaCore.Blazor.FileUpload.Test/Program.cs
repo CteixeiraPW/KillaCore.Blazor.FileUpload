@@ -15,7 +15,7 @@ builder.Services.AddKeyedScoped<IFileUploadServerHooks, ApplicationUploadHooks>(
 
 // 3. Register the frontend UI services (from your Client package)
 // When the component renders on the server via SignalR, it needs an absolute URL to call its own API.
-builder.Services.AddBlazorFileUploadClient();
+builder.Services.AddKillaCoreFileUploadClient();
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
