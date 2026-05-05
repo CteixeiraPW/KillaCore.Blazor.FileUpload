@@ -1,7 +1,8 @@
 ﻿using FileSignatures;
 using KillaCore.Blazor.FileUpload.Controllers;
-using KillaCore.Blazor.FileUpload.Services;
+using KillaCore.Blazor.FileUpload.Filters;
 using KillaCore.Blazor.FileUpload.Models;
+using KillaCore.Blazor.FileUpload.Services;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Configuration;
@@ -15,10 +16,11 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddKillaCoreFileUploadServer(
         this IServiceCollection services,
         IConfiguration configuration,
-        string configSectionName = "KillaCoreFileUpload")
+        bool userIdEnforcement = false,
+        string configSectionName = FileUploadServerOptions.DefaultConfigSectionName)
     {
         // 1. Bind the appsettings.json section to our strongly-typed class
-        services.Configure<FileUploadServerOptions>(configuration.GetSection(configSectionName));
+        services.Configure<FileUploadServerOptions>(configuration.GetSection( configSectionName));
 
         // 2. Register FileSignatures (The "Universal Inspector")
         var allFormats = typeof(FileFormat)
@@ -54,6 +56,12 @@ public static class ServiceCollectionExtensions
         {
             options.Limits.MaxRequestBodySize = 524_288_000;
         });
+
+        // 8. Optional: UserId enforcement filter for authenticated apps
+        if (userIdEnforcement)
+        {
+            services.AddScoped<EnforceAuthenticatedUserFilter>();
+        }
 
         return services;
     }

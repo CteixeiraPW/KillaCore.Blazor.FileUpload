@@ -3,7 +3,35 @@
 public sealed class FileProcessingOptions
 {
     // --- Endpoints ---
-    public string UploadEndpointUrl { get; } = "api/uploads/temp";
+
+    private string? _serverBaseUrl;
+
+    /// <summary>
+    /// Base URL of the upload server. Leave null/empty when client and server are the same app.
+    /// Must include the scheme (e.g., "https://api.example.com" or "https://my.company/apps/myapp").
+    /// </summary>
+    public string? ServerBaseUrl
+    {
+        get => _serverBaseUrl;
+        set
+        {
+            if (!string.IsNullOrWhiteSpace(value) && !value.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException(
+                    $"ServerBaseUrl must include the scheme (http:// or https://). Got: '{value}'",
+                    nameof(ServerBaseUrl));
+            }
+            _serverBaseUrl = value?.TrimEnd('/');
+        }
+    }
+
+    /// <summary>
+    /// The resolved upload endpoint. Relative when same-origin, absolute when cross-origin.
+    /// </summary>
+    public string UploadEndpointUrl => string.IsNullOrEmpty(_serverBaseUrl)
+        ? $"{FileUploadConstants.API_ROUTE_PREFIX}/temp"
+        : $"{_serverBaseUrl}/{FileUploadConstants.API_ROUTE_PREFIX}/temp";
+
 
     // Identifies which server hook should handle this upload. Defaults to "Default".
     public string UploadContext { get; set; } = "Default";
@@ -34,4 +62,16 @@ public sealed class FileProcessingOptions
     public int MaxConcurrentUploads { get; set; } = 5;      // Network Bound (JS Interop)
     public int MaxConcurrentProcessors { get; set; } = 2;   // CPU Bound (Hashing/Saving)
     public int UIProgressUpdateIntervalMs { get; set; } = 400;
+
+
+    /// <summary>
+    /// Returns a fingerprint of the policy-relevant fields.
+    /// Used internally to detect when a policy token refresh is needed.
+    /// </summary>
+    internal string GetPolicyFingerprint()
+    {
+        // Only include fields that affect the server-side policy token
+        var mimes = AllowedMimeTypes.Count == 0 ? "*" : string.Join(",", AllowedMimeTypes.Order());
+        return $"{_serverBaseUrl}|{mimes}";
+    }
 }

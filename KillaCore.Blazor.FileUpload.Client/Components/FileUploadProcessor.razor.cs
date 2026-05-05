@@ -1,11 +1,11 @@
 ﻿using KillaCore.Blazor.FileUpload.Client.Models;
-// ADD THIS: Assuming you created the IFileUploadClientService in this namespace
 using KillaCore.Blazor.FileUpload.Client.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Forms;
+using Microsoft.Extensions.Logging;
 using Microsoft.JSInterop;
 using System.Collections.Concurrent;
-using System.Threading.Channels;
+
 
 namespace KillaCore.Blazor.FileUpload.Client.Components;
 
@@ -14,8 +14,9 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     // --- 1. INJECTIONS ---
     [Inject] private IJSRuntime JsRuntime { get; set; } = default!;
 
-    // ADDED: The client service to talk to your API
     [Inject] private IFileUploadClientService ClientService { get; set; } = default!;
+
+    [Inject] private ILogger<FileUploadProcessor> Logger { get; set; } = default!;
 
     // --- 2. CONFIGURATION ---
     [Parameter, EditorRequired]
@@ -30,8 +31,6 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     // --- 3. EVENT HOOKS ---
     [Parameter] public EventCallback<FileNotificationEvent> OnEvent { get; set; }
 
-    // REMOVED: OnVerifyRemoteDuplicate and OnFileServerUpload (These are Server tasks now)
-
     [Parameter] public Func<IReadOnlyList<FileTransferData>, string, Task>? OnFilesUploadCompleted { get; set; }
 
     // --- 4. PUBLIC STATE ---
@@ -41,10 +40,11 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     // --- INTERNAL STATE ---
     private IJSObjectReference? _jsModule;
     private CancellationTokenSource? _batchCts;
+    private readonly CancellationTokenSource _disposalCts = new();
 
     private DotNetObjectReference<FileUploadProcessor>? _dotNetRef;
-    private readonly ConcurrentDictionary<string, string> _localHashCache = new();
     private string _currentBatchId = string.Empty;
+    private string? _previousPolicyFingerprint;
 
     // State for the Policy Token
     private string _policyToken = string.Empty;
@@ -52,7 +52,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     private record UploadResponse(
         [property: System.Text.Json.Serialization.JsonPropertyName("token")] string Token,
         [property: System.Text.Json.Serialization.JsonPropertyName("size")] long Size,
-        [property: System.Text.Json.Serialization.JsonPropertyName("finalId")] string? FinalId
+        [property: System.Text.Json.Serialization.JsonPropertyName("finalId")] string? FinalId,
+        [property: System.Text.Json.Serialization.JsonPropertyName("metadata")] Dictionary<string, string?> Metadata
     );
 
     // --- LIFECYCLE ---
@@ -61,14 +62,17 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         _dotNetRef = DotNetObjectReference.Create(this);
     }
 
-    // FIXED: Changed to Async and removed DataProtectionProvider
     protected override async Task OnParametersSetAsync()
     {
+        var currentFingerprint = Options.GetPolicyFingerprint();
+        if (currentFingerprint == _previousPolicyFingerprint) return;
+        _previousPolicyFingerprint = currentFingerprint;
+
         try
         {
-            // Ask the server API to generate the encrypted policy based on our options
-            _policyToken = await ClientService.GetPolicyTokenAsync(Options);
+            _policyToken = await ClientService.GetPolicyTokenAsync(Options, _disposalCts.Token);
         }
+        catch (OperationCanceledException) { /* Component disposed, safe to ignore */ }
         catch (Exception ex)
         {
             await FireEventAsync(EventNotificationType.BatchFailed, null, $"Failed to get upload policy from server: {ex.Message}");
@@ -104,14 +108,13 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         }
 
         _transfers.Clear();
-        _localHashCache.Clear();
         _currentBatchId = Guid.NewGuid().ToString();
     }
 
     public async Task ProcessInputFiles(IReadOnlyList<IBrowserFile> browserFiles)
     {
         Clear();
-        
+
         int acceptedCount = 0;
 
         foreach (var file in browserFiles)
@@ -122,8 +125,9 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
             {
                 Index = acceptedCount,
                 BatchId = _currentBatchId,
-                Status = TransferStatus.Pending
+                Status = TransferStatus.Pending,
             };
+            acceptedCount++;
 
             _transfers.Add(model);
 
@@ -167,7 +171,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 }
             }
 
-            if (acceptedCount >= Options.MaxFiles)
+            if (acceptedCount > Options.MaxFiles)
             {
                 model.Status = TransferStatus.Skipped;
                 model.StartTime = DateTime.UtcNow;
@@ -176,15 +180,22 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 await FireEventAsync(EventNotificationType.FileSkipped, model, "Max files reached");
                 continue;
             }
-
-            acceptedCount++;
         }
 
         if (_transfers.All(t => t.IsFinished)) return;
 
         await FireEventAsync(EventNotificationType.BatchStarted);
 
-        _ = RunNetworkProducerAsync(_batchCts!.Token);
+        // Fire-and-forget: starts the upload pipeline without blocking the UI.
+        // Note: In Blazor WASM (single-threaded), this does NOT offload to a background thread.
+        // Concurrency is achieved via async yielding at await points (JS interop, HTTP calls).
+        _ = RunNetworkProducerAsync(_batchCts!.Token).ContinueWith(async task =>
+        {
+            if (task.Exception?.InnerException is { } ex)
+            {
+                await FireEventAsync(EventNotificationType.BatchFailed, null, ex.Message);
+            }
+        }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
     public async Task CancelAllAsync()
@@ -196,8 +207,9 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         {
             t.Status = TransferStatus.Cancelled;
             t.StatusMessage = "Batch Cancelled";
-            await FireEventAsync(EventNotificationType.BatchCancelled);
         }
+
+        await FireEventAsync(EventNotificationType.BatchCancelled);
     }
 
     public async Task CancelFile(string fileId)
@@ -228,6 +240,15 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Uploads all pending files concurrently (up to MaxConcurrentUploads).
+    /// 
+    /// WASM NOTE: Blazor WebAssembly is single-threaded. Parallel.ForEachAsync does NOT achieve
+    /// true CPU parallelism here. However, it still provides concurrent async I/O because each
+    /// iteration awaits JS interop (XMLHttpRequest), which yields the thread and allows other
+    /// iterations to proceed. The MaxDegreeOfParallelism effectively controls how many concurrent
+    /// XHR requests are in-flight simultaneously.
+    /// </summary>
     private async Task RunNetworkProducerAsync(CancellationToken batchToken)
     {
         var pendingModels = _transfers.Where(x => x.Status == TransferStatus.Pending).ToList();
@@ -249,7 +270,6 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 {
                     UpdateStage(model, TransferStage.Uploading, "Uploading...");
 
-                    // FIXED: Replaced SecurityService with API Call to get the token
                     var uploadToken = await ClientService.GetUploadTokenAsync(model.Id, UserId, ct);
 
                     if (string.IsNullOrEmpty(uploadToken))
@@ -278,6 +298,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                         if (response != null && !string.IsNullOrEmpty(response.Token))
                         {
                             model.FinalResourceId = response.FinalId;
+                            model.Metadata = response.Metadata;
                             model.Stage = TransferStage.Completed; // Assuming you have this enum
                             model.Status = TransferStatus.Completed; // CRITICAL FIX
                             model.EndTime = DateTime.UtcNow;
@@ -308,18 +329,28 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 // 1. Tell the Server API that the batch is done
                 try
                 {
-                    await ClientService.NotifyBatchCompletedAsync(_currentBatchId, _transfers, CancellationToken.None);
+                    //only completed files are relevant to the server, failed/skipped/cancelled files are not sent in the notification
+                    var completedTransfers = _transfers.Where(t => t.Status == TransferStatus.Completed).ToList();
+
+                    await ClientService.NotifyBatchCompletedAsync(_currentBatchId, completedTransfers, CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
-                    // FIXED: Actually log the error so you can see it!
-                    Console.WriteLine($"[API Error] Failed to notify batch completed: {ex.Message}");
+                    if (Logger.IsEnabled(LogLevel.Error))
+                        Logger.LogError("[API Error] Failed to notify batch completed:{Message}", ex.Message);
                 }
 
                 // 2. Fire the UI's local callback
                 if (OnFilesUploadCompleted != null)
                 {
-                    try { await OnFilesUploadCompleted(_transfers, _currentBatchId); } catch { }
+                    try 
+                    {
+                        await OnFilesUploadCompleted(_transfers, _currentBatchId); 
+                    } catch (Exception ex)
+                    {
+                        if(Logger.IsEnabled(LogLevel.Error))
+                            Logger.LogError("[Callback Error] OnFilesUploadCompleted threw an exception:{Message}", ex.Message);
+                    }
                 }
             }
         }
@@ -337,6 +368,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     {
         model.Status = TransferStatus.Failed;
         model.StatusMessage = error;
+        model.EndTime = DateTime.UtcNow;
         _ = FireEventAsync(EventNotificationType.FileFailed, model);
     }
 
@@ -353,6 +385,9 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _disposalCts.Cancel();
+        _disposalCts.Dispose();
+
         if (_batchCts != null && !_batchCts.IsCancellationRequested)
             _batchCts?.Cancel();
         foreach (var transfer in _transfers)

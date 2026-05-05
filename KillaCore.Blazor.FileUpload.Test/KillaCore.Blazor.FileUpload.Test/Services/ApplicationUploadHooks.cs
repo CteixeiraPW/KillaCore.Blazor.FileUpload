@@ -11,8 +11,8 @@ public class ApplicationUploadHooks(
 {
     private readonly string _finalStoragePath = Path.Combine(env.ContentRootPath, "SecureUploads");
 
-    // FAKE DATABASE: We use ConcurrentBag because multiple files upload and save simultaneously
-    private static readonly ConcurrentBag<FileMetadataEntity> _fakeDatabase = [];
+    // FAKE DATABASE: We use ConcurrentDictionary because multiple files upload and save simultaneously
+    private static readonly ConcurrentDictionary<string, FileMetadataEntity> _fakeDatabase = new();
 
     /// <summary>
     /// Checks the fake database to see if this exact file has already been uploaded previously.
@@ -20,7 +20,7 @@ public class ApplicationUploadHooks(
     public Task<bool> CheckRemoteDuplicateAsync(string detectedHash, CancellationToken ct)
     {
         // Query the in-memory list
-        bool exists = _fakeDatabase.Any(f => f.FileHash == detectedHash);
+        bool exists = _fakeDatabase.ContainsKey(detectedHash);
 
         if (exists && logger.IsEnabled(LogLevel.Information))
         {
@@ -69,10 +69,14 @@ public class ApplicationUploadHooks(
                 UploadedAt = DateTime.UtcNow
             };
 
-            _fakeDatabase.Add(newRecord);
+            _fakeDatabase.TryAdd(newRecord.FileHash ?? newRecord.Id.ToString(), newRecord);
 
             // 5. Update the package's model so the UI knows where it landed
             data.FinalResourceId = newRecord.Id.ToString();
+
+            // 6. Metadata
+            data.Metadata.Add("PhysicalName", newRecord.PhysicalName);
+
 
             if (logger.IsEnabled(LogLevel.Information))
             {

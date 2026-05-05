@@ -1,6 +1,7 @@
 ﻿using FileSignatures;
 using HeyRed.Mime;
 using KillaCore.Blazor.FileUpload.Client.Models;
+using KillaCore.Blazor.FileUpload.Filters;
 using KillaCore.Blazor.FileUpload.Models;
 using KillaCore.Blazor.FileUpload.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -8,33 +9,39 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace KillaCore.Blazor.FileUpload.Controllers;
 
 [ApiController]
-[Route("api/uploads")]
+[Route(FileUploadConstants.API_ROUTE_PREFIX)]
 public sealed class UploadsController(
     IFileUploadSecurityService securityService, // 1. Inject Security
     IBatchDuplicateTracker duplicateTracker, // 2. Inject the Batch Duplicate Tracker
     IFileFormatInspector inspector,    // 3. Inject the Magic Number Inspector
     IDataProtectionProvider dpProvider, // 4. Data Protection Provider
     IServiceProvider serviceProvider,   // 5. Inject Service Provider for Optional Hooks
-    IOptions<FileUploadServerOptions> options
+    IOptions<FileUploadServerOptions> options,
+    ILogger<UploadsController> logger
     ) : ControllerBase
 {
     [HttpPost("policy")]
     public IActionResult GeneratePolicy([FromBody] List<string>? allowedMimeTypes)
     {
-        var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY);
+        var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY)
+            .ToTimeLimitedDataProtector();
         string rulesPayload = allowedMimeTypes == null || allowedMimeTypes.Count == 0 ? "*" : string.Join(",", allowedMimeTypes);
-        return Ok(new { token = protector.Protect(rulesPayload) });
+        return Ok(new { token = protector.Protect(rulesPayload, TimeSpan.FromMinutes(30)) });
     }
 
     [HttpGet("token/{fileId}")]
-    public IActionResult GenerateToken(string fileId)
+    [EnforceAuthenticatedUser]
+    public IActionResult GenerateToken(string fileId, [FromQuery] string userId)
     {
-        var userId = User.Identity?.Name ?? "Anonymous";
+        if (string.IsNullOrWhiteSpace(userId))
+            return BadRequest("UserId is required.");
+
         var token = securityService.GenerateToken(fileId, userId);
         return Ok(new { token });
     }
@@ -42,7 +49,12 @@ public sealed class UploadsController(
     [HttpPost("batch/{batchId}/complete")]
     public async Task<IActionResult> CompleteBatch(string batchId, [FromBody] List<FileTransferData> files)
     {
-        // You can optionally add security checks here to ensure the user owns the batchId
+        // Security: Verify this batch actually had files uploaded through our pipeline
+        if (!duplicateTracker.TryCompleteBatch(batchId))
+        {
+            logger.LogWarning("Rejected batch completion for unknown or already-completed batch: {BatchId}", batchId);
+            return BadRequest("Batch not found or already completed.");
+        }
 
         var hooks = serviceProvider.GetService<IFileUploadServerHooks>();
 
@@ -74,7 +86,8 @@ public sealed class UploadsController(
         HashSet<string>? allowedMimeTypes = null;
         try
         {
-            var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY);
+            var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY)
+                .ToTimeLimitedDataProtector();
             string decryptedRules = protector.Unprotect(policyHeader.ToString());
 
             if (decryptedRules != "*")
@@ -95,12 +108,10 @@ public sealed class UploadsController(
             return Unauthorized("Missing upload token.");
 
         var secureToken = tokenValues.ToString();
-        var userId = User.Identity?.Name ?? "Anonymous";
 
-        if (!securityService.ValidateToken(secureToken, userId, out _))
+        if (!securityService.ValidateToken(secureToken, out string? fileId, out string? tokenUserId))
             return Unauthorized("Invalid or expired token.");
 
-        // UPDATED: Using the new tracker for Anti-Replay!
         if (!duplicateTracker.RegisterUsedToken(secureToken))
             return BadRequest("This upload token has already been used.");
 
@@ -141,15 +152,24 @@ public sealed class UploadsController(
             await using var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
             await file.CopyToAsync(fs, ct);
         }
+        catch (OperationCanceledException)
+        {
+            TryDelete(tempPath);
+            return StatusCode(499); // Client closed request
+        }
         catch (Exception ex)
         {
             TryDelete(tempPath);
-            return Problem(ex.Message);
+            if(logger.IsEnabled(LogLevel.Error))
+                logger.LogError(ex, "Error saving uploaded file to disk.");
+            return Problem("An internal error occurred while saving the file.");
+
         }
 
         // --- STEP 5: HANDOVER & EXECUTE HOOKS ---
         var handoffToken = Guid.NewGuid().ToString("N");
         string uploadContext = Request.Headers["X-Upload-Context"].FirstOrDefault() ?? "Default";
+        Dictionary<string, string?> metadata = [];
 
         IFileUploadServerHooks? hooks = serviceProvider.GetKeyedService<IFileUploadServerHooks>(uploadContext);
         hooks ??= serviceProvider.GetService<IFileUploadServerHooks>();
@@ -192,6 +212,7 @@ public sealed class UploadsController(
                     }
 
                     isDuplicate = await hooks.CheckRemoteDuplicateAsync(model.DetectedHash, ct);
+                    metadata = model.Metadata;
                 }
 
                 if (!isDuplicate)
@@ -199,6 +220,7 @@ public sealed class UploadsController(
                     await using var finalStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
                     await hooks.SaveFileAsync(model, finalStream, ct);
                     finalId = model.FinalResourceId;
+                    metadata = model.Metadata;
                 }
                 else
                 {
@@ -207,7 +229,9 @@ public sealed class UploadsController(
             }
             catch (Exception ex)
             {
-                return BadRequest($"Server processing error: {ex.Message}");
+                if(logger.IsEnabled(LogLevel.Error))
+                    logger.LogError(ex, "Error processing uploaded file for context '{Context}'", uploadContext);
+                return BadRequest($"Server processing error.");
             }
             finally
             {
@@ -221,7 +245,7 @@ public sealed class UploadsController(
             return StatusCode(500, $"Configuration Error: No IFileUploadServerHooks implementation was registered for context '{uploadContext}'. Please register it in Program.cs.");
         }
 
-        return Ok(new { token = handoffToken, size = file.Length, finalId });
+        return Ok(new { token = handoffToken, size = file.Length, finalId, metadata});
     }
 
     private static (bool IsValid, string? Error) ValidateTextFile(Stream stream, string extension, HashSet<string>? allowedMimes)

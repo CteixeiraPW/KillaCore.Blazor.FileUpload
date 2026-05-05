@@ -1,7 +1,9 @@
 ﻿using KillaCore.Blazor.FileUpload.Models;
 using Microsoft.Extensions.Options;
+using System.Buffers.Text;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 namespace KillaCore.Blazor.FileUpload.Services;
 
@@ -10,7 +12,6 @@ internal class HmacFileUploadSecurityService : IFileUploadSecurityService
     private readonly byte[] _secretKeyBytes;
     private readonly TimeSpan _tokenLifespan = TimeSpan.FromMinutes(5);
 
-    // Constructor accepts the key securely via the Options pattern
     public HmacFileUploadSecurityService(IOptions<FileUploadServerOptions> options)
     {
         var secretKey = options.Value.SecretKey;
@@ -25,82 +26,93 @@ internal class HmacFileUploadSecurityService : IFileUploadSecurityService
 
     public string GenerateToken(string fileId, string userId)
     {
-        // 1. Create the Payload
-        // We include the FileId, UserId, and Expiration Timestamp
         var expiry = DateTimeOffset.UtcNow.Add(_tokenLifespan).ToUnixTimeSeconds();
-        var payload = $"{fileId}:{userId}:{expiry}";
 
-        // 2. Sign the Payload
-        var signature = ComputeSignature(payload);
+        var payload = new TokenPayload(fileId, userId, expiry);
+        var payloadJson = JsonSerializer.Serialize(payload);
+        var payloadBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson));
 
-        // 3. Combine and Encode
-        // Final Format: "fileId:userId:expiry:signature" (Base64 Encoded)
-        var combined = $"{payload}:{signature}";
-        return Convert.ToBase64String(Encoding.UTF8.GetBytes(combined));
+        var signature = ComputeSignature(payloadBase64);
+
+        // Final token: base64(json).signature (dot-separated, safe since Base64 and HMAC don't contain dots)
+        var combined = $"{payloadBase64}.{signature}";
+        return ToBase64Url(Encoding.UTF8.GetBytes(combined));
     }
 
-    public bool ValidateToken(string token, string expectedUserId, out string? fileId)
+    public bool ValidateToken(string token, out string? fileId, out string? userId)
     {
         fileId = null;
+        userId = null;
 
         if (string.IsNullOrWhiteSpace(token))
             return false;
 
         try
         {
-            // 1. Decode
-            var decodedString = Encoding.UTF8.GetString(Convert.FromBase64String(token));
-            var parts = decodedString.Split(':');
+            var decodedString = Encoding.UTF8.GetString(FromBase64Url(token));
 
-            // We expect 4 parts: [0]FileId, [1]UserId, [2]Expiry, [3]Signature
-            if (parts.Length != 4)
+            // Split on '.' — exactly 2 parts: payload and signature
+            var dotIndex = decodedString.LastIndexOf('.');
+            if (dotIndex < 0)
                 return false;
 
-            var fId = parts[0];
-            var uId = parts[1];
-            var expString = parts[2];
-            var providedSignature = parts[3];
+            var payloadBase64 = decodedString[..dotIndex];
+            var providedSignature = decodedString[(dotIndex + 1)..];
 
-            // 2. Check Ownership (Prevent User A from using User B's token)
-            if (!string.Equals(uId, expectedUserId, StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            // 3. Check Expiration
-            if (!long.TryParse(expString, out var exp))
-                return false;
-
-            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            if (now > exp)
-                return false; // Expired
-
-            // 4. Verify Signature (The most critical step)
-            var payloadToVerify = $"{fId}:{uId}:{expString}";
-            var computedSignature = ComputeSignature(payloadToVerify);
-
-            // Convert to ReadOnlySpan<byte> for the built-in Crypto API
+            // 1. Verify Signature
+            var computedSignature = ComputeSignature(payloadBase64);
             var computedBytes = Encoding.UTF8.GetBytes(computedSignature);
             var providedBytes = Encoding.UTF8.GetBytes(providedSignature);
 
-            // --- CHANGED: Use the highly optimized .NET built-in method to prevent timing attacks ---
-            if (CryptographicOperations.FixedTimeEquals(computedBytes, providedBytes))
-            {
-                fileId = fId;
-                return true;
-            }
+            if (!CryptographicOperations.FixedTimeEquals(computedBytes, providedBytes))
+                return false;
+
+            // 2. Decode payload
+            var payloadJson = Encoding.UTF8.GetString(Convert.FromBase64String(payloadBase64));
+            var payload = JsonSerializer.Deserialize<TokenPayload>(payloadJson);
+
+            if (payload is null)
+                return false;
+
+            // 3. Check Expiration
+            if (DateTimeOffset.UtcNow.ToUnixTimeSeconds() > payload.Exp)
+                return false;
+
+            fileId = payload.FileId;
+            userId = payload.UserId;
+            return true;
         }
         catch
         {
-            // Invalid Base64 or corrupted token format
+            return false;
+        }
+    }
+
+    public bool ValidateToken(string token, string expectedUserId, out string? fileId)
+    {
+        if (!ValidateToken(token, out fileId, out string? userId))
+            return false;
+
+        if (!string.Equals(userId, expectedUserId, StringComparison.OrdinalIgnoreCase))
+        {
+            fileId = null;
             return false;
         }
 
-        return false;
+        return true;
     }
 
-    private string ComputeSignature(string payload)
+    private string ComputeSignature(string data)
     {
         using var hmac = new HMACSHA256(_secretKeyBytes);
-        var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(payload));
+        var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(data));
         return Convert.ToBase64String(hashBytes);
     }
+
+    // --- Base64Url helpers (no padding, URL-safe) ---
+    private static string ToBase64Url(byte[] bytes) => Base64Url.EncodeToString(bytes);
+
+    private static byte[] FromBase64Url(string base64Url) => Base64Url.DecodeFromChars(base64Url);
+
+    private sealed record TokenPayload(string FileId, string UserId, long Exp);
 }

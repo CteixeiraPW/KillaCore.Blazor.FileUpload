@@ -11,7 +11,7 @@ public sealed class FileTransferData : IDisposable
     public string FileName { get; set; } = string.Empty;
     public long FileSize { get; set; } = 0;
     public string MimeType { get; set; } = string.Empty;
-    public Dictionary<string, string> Metadata { get; set; } = [];
+    public Dictionary<string, string?> Metadata { get; set; } = [];
 
     // --- State ---
     [JsonIgnore]

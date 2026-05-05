@@ -2,6 +2,8 @@
 
 public class FileUploadServerOptions
 {
+    public const string DefaultConfigSectionName = "KillaCoreFileUpload";
+
     /// <summary>
     /// The secret key used to sign HMAC Anti-Replay tokens. Must be at least 16 characters.
     /// </summary>

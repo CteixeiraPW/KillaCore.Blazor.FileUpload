@@ -7,23 +7,19 @@ namespace KillaCore.Blazor.FileUpload.Client.Services;
 public class DefaultFileUploadClientService : IFileUploadClientService
 {
     private readonly HttpClient _httpClient;
+    private static readonly string _prefix = FileUploadConstants.API_ROUTE_PREFIX;
 
-    // Inject both HttpClient AND NavigationManager
     public DefaultFileUploadClientService(HttpClient httpClient, NavigationManager navManager)
     {
         _httpClient = httpClient;
 
-        // Automatically set the absolute URL for Blazor Server 
-        // (WASM usually sets this automatically, so we check for null first)
-        if (_httpClient.BaseAddress == null)
-        {
-            _httpClient.BaseAddress = new Uri(navManager.BaseUri);
-        }
+        // Set BaseAddress here — this runs per-scope so NavigationManager is available
+        _httpClient.BaseAddress ??= new Uri(navManager.BaseUri);
     }
 
     public async Task<string> GetPolicyTokenAsync(FileProcessingOptions options, CancellationToken ct)
     {
-        var response = await _httpClient.PostAsJsonAsync("api/uploads/policy", options.AllowedMimeTypes, ct);
+        var response = await _httpClient.PostAsJsonAsync($"{_prefix}/policy", options.AllowedMimeTypes, ct);
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken: ct);
         return result?.Token ?? string.Empty;
@@ -31,7 +27,8 @@ public class DefaultFileUploadClientService : IFileUploadClientService
 
     public async Task<string> GetUploadTokenAsync(string fileId, string userId, CancellationToken ct)
     {
-        var response = await _httpClient.GetAsync($"api/uploads/token/{fileId}", ct);
+        var response = await _httpClient.GetAsync(
+            $"{_prefix}/token/{Uri.EscapeDataString(fileId)}?userId={Uri.EscapeDataString(userId)}", ct);
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken: ct);
         return result?.Token ?? string.Empty;
@@ -39,7 +36,7 @@ public class DefaultFileUploadClientService : IFileUploadClientService
 
     public async Task NotifyBatchCompletedAsync(string batchId, IEnumerable<FileTransferData> files, CancellationToken ct = default)
     {
-        var response = await _httpClient.PostAsJsonAsync($"api/uploads/batch/{batchId}/complete", files, ct);
+        var response = await _httpClient.PostAsJsonAsync($"{_prefix}/batch/{batchId}/complete", files, ct);
         response.EnsureSuccessStatusCode();
     }
 
