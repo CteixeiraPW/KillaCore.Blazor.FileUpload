@@ -319,13 +319,15 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 }
             });
         }
-        catch (OperationCanceledException) { /* Batch Cancelled */ }
+        catch (OperationCanceledException) { /* Batch Cancelled */
+            await FireEventAsync(EventNotificationType.BatchCancelled);
+        }
         finally
         {
-            await FireEventAsync(EventNotificationType.BatchCompleted);
-
             if (!batchToken.IsCancellationRequested)
             {
+                await FireEventAsync(EventNotificationType.BatchCompleted);
+
                 // 1. Tell the Server API that the batch is done
                 try
                 {
