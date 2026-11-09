@@ -50,17 +50,6 @@ public enum TransferStage
     Completed
 }
 
-// This enum ONLY contains the optional features the user can toggle.
-public enum FileUploadFeature
-{
-    [Description("Verify Local Duplicates")]
-    VerifyLocalDuplicates,   // Maps to TransferStage.VerifyingLocalDuplicates
-    [Description("Verify Remote Duplicates")]
-    VerifyRemoteDuplicates,  // Maps to TransferStage.VerifyingRemoteDuplicates
-    [Description("Save To Server")]
-    SaveToServer             // Maps to TransferStage.ServerSaving
-}
-
 /// <summary>
 /// How the server resolved a single file. Returned by the upload endpoint so the client can
 /// tell a successful save apart from a deliberate, non-error skip. Sent on the wire as a

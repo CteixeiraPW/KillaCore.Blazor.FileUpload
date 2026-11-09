@@ -4,7 +4,6 @@ using KillaCore.Blazor.FileUpload.Client.Models;
 using KillaCore.Blazor.FileUpload.Filters;
 using KillaCore.Blazor.FileUpload.Models;
 using KillaCore.Blazor.FileUpload.Services;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -84,7 +83,10 @@ public sealed class UploadsController(
         => serviceProvider.GetKeyedService<IFileUploadServerHooks>(uploadContext)
            ?? serviceProvider.GetService<IFileUploadServerHooks>();
 
-    [AllowAnonymous]
+    // Deliberately carries NO [AllowAnonymous]: hard-coding it would override the host
+    // application's authorization fallback policy, leaving this endpoint open in an app that had
+    // locked everything else down, with no way for the consumer to close it. Apps that want
+    // anonymous uploads ask for them via AddKillaCoreFileUploadServer(allowAnonymousUploads: true).
     [HttpPost("temp")]
     [RequestSizeLimit(1024 * 1024 * 500)]
     public async Task<IActionResult> UploadTemp([FromForm] IFormFile file, CancellationToken ct)

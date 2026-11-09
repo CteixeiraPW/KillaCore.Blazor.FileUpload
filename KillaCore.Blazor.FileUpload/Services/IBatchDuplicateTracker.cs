@@ -1,8 +1,16 @@
 ﻿namespace KillaCore.Blazor.FileUpload.Services;
 
 /// <summary>
-/// Tracks file hashes concurrently during an active upload batch to prevent
-/// the user from uploading identical file contents simultaneously.
+/// Tracks file hashes and consumed upload tokens for the lifetime of a batch, preventing both
+/// duplicate content within a batch and replay of a one-time upload token.
+/// <para>
+/// <b>Single-process only.</b> The built-in implementation is backed by <c>IMemoryCache</c>, so
+/// across a web farm each server keeps its own state: a token can be replayed once per server,
+/// and in-batch duplicate detection only sees the files that landed on the same node.
+/// Deployments behind a load balancer should either use sticky sessions, or register their own
+/// implementation over a distributed store offering an atomic insert-if-absent (for example
+/// Redis <c>SET NX</c>). This interface is public for exactly that reason.
+/// </para>
 /// </summary>
 public interface IBatchDuplicateTracker
 {

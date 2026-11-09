@@ -17,7 +17,8 @@ public static class ServiceCollectionExtensions
         this IServiceCollection services,
         IConfiguration configuration,
         bool userIdEnforcement = false,
-        string configSectionName = FileUploadServerOptions.DefaultConfigSectionName)
+        string configSectionName = FileUploadServerOptions.DefaultConfigSectionName,
+        bool allowAnonymousUploads = false)
     {
         // 1. Bind the appsettings.json section to our strongly-typed class
         services.Configure<FileUploadServerOptions>(configuration.GetSection( configSectionName));
@@ -42,7 +43,14 @@ public static class ServiceCollectionExtensions
         services.AddHostedService<TempFileCleanupService>();
 
         // 5. Register Controller Discovery
-        services.AddControllers()
+        //    The upload endpoints inherit whatever authorization the host application has set up,
+        //    including its FallbackPolicy. Pass allowAnonymousUploads: true to opt them out
+        //    explicitly — see AllowAnonymousUploadsConvention for why this is not an attribute.
+        services.AddControllers(mvcOptions =>
+                {
+                    if (allowAnonymousUploads)
+                        mvcOptions.Conventions.Add(new AllowAnonymousUploadsConvention());
+                })
                 .AddApplicationPart(typeof(UploadsController).Assembly);
 
         // 6. Configure Form Options

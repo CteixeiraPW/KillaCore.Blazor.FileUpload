@@ -7,14 +7,30 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
 {
     internal const string DefaultContext = "Default";
 
-    private static readonly object _tokenUsedMarker = new();
+    private static readonly object _usedMarker = new();
 
     private static readonly TimeSpan _batchLifespan = TimeSpan.FromHours(1);
+    private static readonly TimeSpan _tokenLifespan = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Per-batch state: the content hashes seen so far, plus the upload context that
-    /// owns the batch. The context is captured server-side on the first request of the
-    /// batch so the completion call cannot name a different one.
+    /// Guards the cache's read-then-write sequences.
+    /// <para>
+    /// <see cref="IMemoryCache"/> offers no atomic test-and-set: <c>GetOrCreate</c> can run its
+    /// factory on two threads at once, so two concurrent requests bearing the SAME upload token
+    /// could both be told they were the first — which is precisely the replay this class exists
+    /// to prevent, and concurrent requests are the norm given MaxConcurrentUploads.
+    /// </para>
+    /// <para>
+    /// Each critical section is a dictionary probe plus an insert, measured in microseconds
+    /// against uploads measured in seconds, so serialising them costs nothing worth having.
+    /// </para>
+    /// </summary>
+    private readonly Lock _gate = new();
+
+    /// <summary>
+    /// Per-batch state: the content hashes seen so far, plus the upload context that owns the
+    /// batch. The context is captured server-side on the batch's first request so the completion
+    /// call cannot name a different one.
     /// </summary>
     private sealed class BatchState
     {
@@ -24,13 +40,26 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
 
     private static string BatchKey(string batchId) => $"batch_hashes_{batchId}";
 
+    private static string CompletionKey(string batchId) => $"batch_completed_{batchId}";
+
     private BatchState GetOrCreateBatch(string batchId, string uploadContext)
     {
-        return cache.GetOrCreate(BatchKey(batchId), entry =>
+        var key = BatchKey(batchId);
+
+        // Fast path: an existing batch needs no lock, since IMemoryCache reads are thread-safe.
+        if (cache.TryGetValue(key, out BatchState? existing) && existing is not null)
+            return existing;
+
+        lock (_gate)
         {
-            entry.AbsoluteExpirationRelativeToNow = _batchLifespan;
-            return new BatchState { UploadContext = uploadContext };
-        })!;
+            // Re-check: another thread may have created it between the probe and the lock.
+            if (cache.TryGetValue(key, out BatchState? current) && current is not null)
+                return current;
+
+            var created = new BatchState { UploadContext = uploadContext };
+            cache.Set(key, created, _batchLifespan);
+            return created;
+        }
     }
 
     public void RegisterBatch(string batchId, string uploadContext)
@@ -48,10 +77,11 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
         if (string.IsNullOrEmpty(batchId) || string.IsNullOrEmpty(fileHash))
             return true;
 
-        // The batch is normally created by RegisterBatch earlier in the request;
-        // create defensively so a hash is never silently dropped.
+        // The batch is normally created by RegisterBatch earlier in the request; create
+        // defensively so a hash is never silently dropped.
         var state = GetOrCreateBatch(batchId, DefaultContext);
 
+        // ConcurrentDictionary.TryAdd is already atomic, so this stays outside the lock.
         return state.Hashes.TryAdd(fileHash, 1);
     }
 
@@ -60,16 +90,14 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
         if (string.IsNullOrWhiteSpace(secureToken))
             return false;
 
-        bool isNew = false;
-
-        cache.GetOrCreate(secureToken, entry =>
+        lock (_gate)
         {
-            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
-            isNew = true;
-            return _tokenUsedMarker;
-        });
+            if (cache.TryGetValue(secureToken, out _))
+                return false;
 
-        return isNew;
+            cache.Set(secureToken, _usedMarker, _tokenLifespan);
+            return true;
+        }
     }
 
     public bool IsBatchKnown(string batchId)
@@ -87,25 +115,19 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
         if (string.IsNullOrEmpty(batchId))
             return false;
 
-        // Ensure the batch actually came through our pipeline
-        if (!cache.TryGetValue(BatchKey(batchId), out BatchState? state) || state is null)
-            return false;
-
-        // Prevent completing the same batch twice
-        string completionKey = $"batch_completed_{batchId}";
-
-        bool isNew = false;
-        cache.GetOrCreate(completionKey, entry =>
+        lock (_gate)
         {
-            entry.AbsoluteExpirationRelativeToNow = _batchLifespan;
-            isNew = true;
-            return _tokenUsedMarker;
-        });
+            // Ensure the batch actually came through our pipeline.
+            if (!cache.TryGetValue(BatchKey(batchId), out BatchState? state) || state is null)
+                return false;
 
-        if (!isNew)
-            return false;
+            // Prevent completing the same batch twice.
+            if (cache.TryGetValue(CompletionKey(batchId), out _))
+                return false;
 
-        uploadContext = state.UploadContext;
-        return true;
+            cache.Set(CompletionKey(batchId), _usedMarker, _batchLifespan);
+            uploadContext = state.UploadContext;
+            return true;
+        }
     }
 }

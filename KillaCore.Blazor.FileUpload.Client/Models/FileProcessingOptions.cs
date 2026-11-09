@@ -36,32 +36,42 @@ public sealed class FileProcessingOptions
     // Identifies which server hook should handle this upload. Defaults to "Default".
     public string UploadContext { get; set; } = "Default";
 
-    // ✅ SAFE: The user can ONLY add valid features here.
-    // They cannot add "Uploading" or "Hashing" because the enum doesn't have them.
-    public HashSet<FileUploadFeature> EnabledFeatures { get; set; } =
-    [
-        FileUploadFeature.VerifyLocalDuplicates,
-        FileUploadFeature.VerifyRemoteDuplicates,
-        FileUploadFeature.SaveToServer
-    ];
+    /// <summary>
+    /// Skip a file when an earlier file in the same selection already has the same name and
+    /// size. This is a client-side convenience only: the server independently rejects content
+    /// whose SHA-256 already appeared in the batch, whatever this is set to.
+    /// </summary>
+    public bool VerifyLocalDuplicates { get; set; } = true;
 
     // --- Constraints ---
     public int MaxFiles { get; set; } = 10;
     public long MaxSizeFileBytes { get; set; } = 1024 * 1024 * 50; // 50MB
+    /// <summary>
+    /// MIME types the client will accept, also sent to the server as the upload policy.
+    /// An empty list means any type.
+    /// <para>
+    /// <c>text/html</c> is deliberately NOT in this default. HTML carries no magic number, so it
+    /// can only be validated as "text", and an HTML file served back from the application's own
+    /// origin executes as a page — stored XSS. Add it only if you have decided how uploaded
+    /// content is served; see the README note on serving uploaded content.
+    /// </para>
+    /// </summary>
     public List<string> AllowedMimeTypes { get; set; } =
     [
         "image/jpeg", "image/png", "image/bmp", "image/tiff", "image/heif",
-        "application/pdf", "text/html",
+        "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.ms-excel",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     ];
 
-    // --- Concurrency & UI ---
-    public int MaxConcurrentUploads { get; set; } = 5;      // Network Bound (JS Interop)
-    public int MaxConcurrentProcessors { get; set; } = 2;   // CPU Bound (Hashing/Saving)
-    public int UIProgressUpdateIntervalMs { get; set; } = 400;
+    // --- Concurrency ---
+
+    /// <summary>
+    /// How many XHR transfers may be in flight at once.
+    /// </summary>
+    public int MaxConcurrentUploads { get; set; } = 5;
 
 
     /// <summary>

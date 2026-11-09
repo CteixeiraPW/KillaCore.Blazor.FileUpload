@@ -213,12 +213,7 @@ You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` f
         MaxFiles = 5,
         MaxSizeFileBytes = 1024 * 1024 * 500, // 500 MB limit
         MaxConcurrentUploads = 2,             // Throttle network connections
-        AllowedMimeTypes = ["image/jpeg", "image/png", "application/pdf"],
-        EnabledFeatures = [
-            FileUploadFeature.VerifyLocalDuplicates, 
-            FileUploadFeature.VerifyRemoteDuplicates, 
-            FileUploadFeature.SaveToServer
-        ]
+        AllowedMimeTypes = ["image/jpeg", "image/png", "application/pdf"]
     };
 
     private async Task HandleInputOnChange(InputFileChangeEventArgs e)
@@ -251,13 +246,48 @@ You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` f
 | :--- | :--- | :--- |
 | `MaxFiles` | `10` | Maximum number of files **accepted** per batch. Extras are marked `Skipped` with a `FileSkipped` event rather than rejected outright, so pass `int.MaxValue` to `GetMultipleFiles` and let the component enforce this limit. |
 | `MaxSizeFileBytes` | `50 MB` | Hard size limit per file. Validated instantly on the client. |
-| `AllowedMimeTypes` | `*` (Any) | List of allowed MIME types. Sent securely as an encrypted policy. |
+| `AllowedMimeTypes` | images, PDF, Office formats | Types the client accepts, also sent to the server as the upload policy. An empty list means any type. `text/html` is **not** included by default — see *Serving uploaded content* below. |
 | `MaxConcurrentUploads` | `5` | Throttle limit for how many parallel XHR network requests are executed. |
-| `EnabledFeatures` | All | Toggle `VerifyLocalDuplicates`, `VerifyRemoteDuplicates`, or `SaveToServer` flags. |
+| `VerifyLocalDuplicates` | `true` | Skip a file when an earlier file in the same selection has the same name and size. A client-side convenience only — the server rejects duplicate **content** by SHA-256 either way. |
 
 ---
 
 ## ⚠️ Important Production Considerations
+
+### Authorization
+
+The upload endpoints carry **no `[AllowAnonymous]`**. They inherit whatever authorization your application has configured, including `AuthorizationOptions.FallbackPolicy`. So if your app does this:
+
+```csharp
+builder.Services.AddAuthorization(o =>
+    o.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());
+```
+
+…the upload API requires an authenticated user too, with nothing extra to wire up.
+
+If your app configures no authentication, or no fallback policy, the endpoints stay open exactly as they are today — nothing to change.
+
+If you *want* anonymous uploads in an app that otherwise requires authentication, say so explicitly:
+
+```csharp
+builder.Services.AddKillaCoreFileUploadServer(builder.Configuration, allowAnonymousUploads: true);
+```
+
+> **⚠️ Upgrading from an earlier version:** the upload action used to carry `[AllowAnonymous]`. Because that attribute is explicit authorization metadata, it *overrode* a fallback policy — an application that required an authenticated user everywhere still had its file-receiving endpoint reachable anonymously, and could not close it without replacing the controller. If your uploads were anonymous by design **and** your app has a fallback policy, set `allowAnonymousUploads: true` when you upgrade.
+
+### Serving uploaded content
+
+Validating an upload establishes what a file *is*. It says nothing about what happens when you serve it back. A file served from your application's own origin runs in that origin's security context, so an uploaded `.html` — or anything a browser will sniff as markup — becomes stored XSS against your own users.
+
+That is why `text/html` is **not** in the default `AllowedMimeTypes`. HTML carries no magic number, so content inspection can only confirm that the bytes are text; the server cannot tell a document from an attack.
+
+If you serve uploaded files back to users, do at least one of the following, whichever types you allow:
+
+* serve them from a **separate origin** — a different domain, not merely a different path
+* send `Content-Disposition: attachment` so the browser downloads instead of rendering
+* send `X-Content-Type-Options: nosniff` together with a `Content-Type` **you** decide, never the one the client supplied
+
+This is the consuming application's responsibility: the package never serves files, so it cannot do it for you.
 
 ### IIS & Web Server Request Limits
 By default, ASP.NET Kestrel and IIS block HTTP POST requests larger than **30MB**. Even though this component supports 500MB+ configurations, your web server will reject the request with a `413 Payload Too Large` error before it ever reaches the `UploadsController`.

@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.Extensions.Logging;
 using Microsoft.JSInterop;
-using System.Collections.Concurrent;
 
 
 namespace KillaCore.Blazor.FileUpload.Client.Components;
@@ -170,7 +169,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 continue;
             }
 
-            if (Options.EnabledFeatures.Contains(FileUploadFeature.VerifyLocalDuplicates))
+            if (Options.VerifyLocalDuplicates)
             {
                 // Look at the transfers we ALREADY accepted in this specific batch
                 bool isLocalDuplicate = _transfers.Any(t =>
@@ -264,11 +263,25 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
         var model = _transfers.FirstOrDefault(x => x.Index == fileIndex);
 
-        if (model != null && !model.IsFinished)
+        if (model is null || model.IsFinished) return;
+
+        model.StageProgressPercent = percent;
+
+        // Once every byte is sent the transfer is no longer uploading: the request stays open
+        // while the server inspects, hashes, checks for duplicates and runs SaveFileAsync.
+        // Without this the row reads "Uploading 100%" for that entire phase and looks hung.
+        //
+        // The fields are set directly rather than through UpdateStage, which zeroes
+        // StageProgressPercent and would make the bar drop from full back to empty here.
+        if (percent >= 100 && model.Stage == TransferStage.Uploading)
         {
-            model.StageProgressPercent = percent;
-            _ = FireEventAsync(EventNotificationType.Progress, model);
+            model.Stage = TransferStage.ServerSaving;
+            model.StatusMessage = "Processing on server...";
+            _ = FireEventAsync(EventNotificationType.StageChange, model);
+            return;
         }
+
+        _ = FireEventAsync(EventNotificationType.Progress, model);
     }
 
     /// <summary>

@@ -29,7 +29,6 @@ public sealed class FileTransferData : IDisposable
     public string? FinalResourceId { get; set; }
 
     // --- Cancellation/UI ---
-    public DateTime LastUIUpdate { get; set; } = DateTime.MinValue;
     public DateTime StartTime { get; set; } // [NEW] Good for calculating speed
     public DateTime? EndTime { get; set; }  // [NEW] Good for analytics
 
@@ -55,22 +54,14 @@ public sealed class FileTransferData : IDisposable
     {
         get
         {
-            if (Status == TransferStatus.Completed || Status == TransferStatus.Skipped) return 100;
+            if (Status is TransferStatus.Completed or TransferStatus.Skipped) return 100;
             if (Status == TransferStatus.Pending) return 0;
 
-            // For Failed/Cancelled, leave the bar exactly where it died during upload
-            if (Status == TransferStatus.Cancelled || Status == TransferStatus.Failed)
-            {
-                return StageProgressPercent;
-            }
-
-            // During Uploading, just use the raw network percentage (0 to 100)
-            if (Stage == TransferStage.Uploading)
-            {
-                return StageProgressPercent;
-            }
-
-            return 0;
+            // Everything else - in flight, cancelled or failed - reports the progress of the
+            // stage it is in, or died in. Uploading tracks the byte transfer; the stages after
+            // it keep the bar full while the server works, so moving into the server phase does
+            // not visibly reset the bar to zero.
+            return Stage == TransferStage.Pending ? 0 : StageProgressPercent;
         }
     }
 
