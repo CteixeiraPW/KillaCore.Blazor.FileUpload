@@ -1,0 +1,21 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fileupload-test",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": [
+        "run",
+        "--project",
+        "KillaCore.Blazor.FileUpload.Test/KillaCore.Blazor.FileUpload.Test/KillaCore.Blazor.FileUpload.Test.csproj",
+        "--launch-profile",
+        "http",
+        "--",
+        "--urls",
+        "http://localhost:5123"
+      ],
+      "port": 5123,
+      "url": "http://localhost:5123"
+    }
+  ]
+}

@@ -83,8 +83,11 @@ Add the `FileUploadProcessor` to your Razor component. You provide a standard HT
 
     private async Task HandleFileSelection(InputFileChangeEventArgs e)
     {
-        // Hand the files over to the processor
-        var files = e.GetMultipleFiles(_options.MaxFiles).ToList();
+        // Pass int.MaxValue, NOT MaxFiles. GetMultipleFiles THROWS when the user selects more
+        // files than its cap, and an unhandled throw here tears down an Interactive Server
+        // circuit. Let the processor enforce MaxFiles instead: it marks the extras as Skipped
+        // and raises FileSkipped, so the user is told why.
+        var files = e.GetMultipleFiles(int.MaxValue).ToList();
         await _processor.ProcessInputFiles(files);
     }
 

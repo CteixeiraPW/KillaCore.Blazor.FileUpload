@@ -61,6 +61,21 @@ public enum FileUploadFeature
     SaveToServer             // Maps to TransferStage.ServerSaving
 }
 
+/// <summary>
+/// How the server resolved a single file. Returned by the upload endpoint so the client can
+/// tell a successful save apart from a deliberate, non-error skip. Sent on the wire as a
+/// string, because the host application — not this library — owns the server's JSON options.
+/// </summary>
+public enum UploadOutcome
+{
+    [Description("Saved")]
+    Saved = 0,                // Handed to IFileUploadServerHooks.SaveFileAsync
+    [Description("Duplicate In Batch")]
+    DuplicateInBatch,         // Identical content already uploaded in this same batch
+    [Description("Duplicate On Server")]
+    DuplicateOnServer         // Already present in the application's permanent storage
+}
+
 public enum TransferStatus
 {
     [Description("Pending")]

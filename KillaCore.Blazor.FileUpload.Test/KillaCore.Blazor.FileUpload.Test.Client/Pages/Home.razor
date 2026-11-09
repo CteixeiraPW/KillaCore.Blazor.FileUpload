@@ -88,8 +88,10 @@
     // Fired when the user clicks "Browse..." and picks files
     private async Task HandleFileSelection(InputFileChangeEventArgs e)
     {
-        // Get the files from Blazor
-        var files = e.GetMultipleFiles(_uploadOptions.MaxFiles).ToList();
+        // int.MaxValue, NOT MaxFiles: GetMultipleFiles throws if the user picks more files than
+        // its cap, which would tear down the circuit. The processor applies MaxFiles itself and
+        // marks the extras as Skipped.
+        var files = e.GetMultipleFiles(int.MaxValue).ToList();
 
         // Hand them off to your processor to start the pipeline
         if (_processor != null)

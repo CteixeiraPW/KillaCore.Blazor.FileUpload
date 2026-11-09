@@ -49,14 +49,16 @@ public sealed class UploadsController(
     [HttpPost("batch/{batchId}/complete")]
     public async Task<IActionResult> CompleteBatch(string batchId, [FromBody] List<FileTransferData> files)
     {
-        // Security: Verify this batch actually had files uploaded through our pipeline
-        if (!duplicateTracker.TryCompleteBatch(batchId))
+        // Security: Verify this batch actually had files uploaded through our pipeline.
+        // The upload context comes from the server-side batch record, not from the caller,
+        // so a completion request cannot route itself to a different set of hooks.
+        if (!duplicateTracker.TryCompleteBatch(batchId, out var batchUploadContext))
         {
             logger.LogWarning("Rejected batch completion for unknown or already-completed batch: {BatchId}", batchId);
             return BadRequest("Batch not found or already completed.");
         }
 
-        var hooks = serviceProvider.GetService<IFileUploadServerHooks>();
+        var hooks = ResolveHooks(batchUploadContext ?? DEFAULT_UPLOAD_CONTEXT);
 
         if (hooks != null)
         {
@@ -70,6 +72,17 @@ public sealed class UploadsController(
 
     // List of extensions that do not have "Magic Numbers" and must be validated by content
     private static readonly HashSet<string> _textExtensions = [".txt", ".md", ".markdown", ".json", ".csv", ".xml", ".html", ".css", ".js"];
+
+    private const string DEFAULT_UPLOAD_CONTEXT = "Default";
+
+    /// <summary>
+    /// Resolves the developer's hooks for a given upload context, falling back to a
+    /// non-keyed registration. Shared by the upload and batch-completion actions so the
+    /// two cannot drift apart.
+    /// </summary>
+    private IFileUploadServerHooks? ResolveHooks(string uploadContext)
+        => serviceProvider.GetKeyedService<IFileUploadServerHooks>(uploadContext)
+           ?? serviceProvider.GetService<IFileUploadServerHooks>();
 
     [AllowAnonymous]
     [HttpPost("temp")]
@@ -114,6 +127,16 @@ public sealed class UploadsController(
 
         if (!duplicateTracker.RegisterUsedToken(secureToken))
             return BadRequest("This upload token has already been used.");
+
+        // Record the batch as legitimate now that a valid, unused token has been presented —
+        // before content validation, so that a batch whose files ALL fail validation can still
+        // report completion and let the app log or notify on it.
+        string uploadContext = Request.Headers["X-Upload-Context"].FirstOrDefault() ?? DEFAULT_UPLOAD_CONTEXT;
+        string clientBatchId = Request.Headers.TryGetValue("X-Batch-Id", out var bId)
+            ? bId.ToString()
+            : string.Empty;
+
+        duplicateTracker.RegisterBatch(clientBatchId, uploadContext);
 
         // --- STEP 3: CONTENT INSPECTION (The "Is it Real?" check) ---
 
@@ -168,20 +191,15 @@ public sealed class UploadsController(
 
         // --- STEP 5: HANDOVER & EXECUTE HOOKS ---
         var handoffToken = Guid.NewGuid().ToString("N");
-        string uploadContext = Request.Headers["X-Upload-Context"].FirstOrDefault() ?? "Default";
         Dictionary<string, string?> metadata = [];
 
-        IFileUploadServerHooks? hooks = serviceProvider.GetKeyedService<IFileUploadServerHooks>(uploadContext);
-        hooks ??= serviceProvider.GetService<IFileUploadServerHooks>();
+        IFileUploadServerHooks? hooks = ResolveHooks(uploadContext);
 
         string? finalId = null;
+        var uploadOutcome = UploadOutcome.Saved;
 
         if (hooks != null)
         {
-            string clientBatchId = Request.Headers.TryGetValue("X-Batch-Id", out var bId)
-                ? bId.ToString()
-                : string.Empty;
-
             var model = new FileTransferData
             {
                 Id = handoffToken,
@@ -200,32 +218,30 @@ public sealed class UploadsController(
                     model.DetectedHash = Convert.ToHexString(hashBytes);
                 }
 
-                bool isDuplicate = false;
-
+                // A duplicate is NOT an error: the pipeline worked and correctly declined to store
+                // a second copy. Both cases are reported as a successful request carrying a
+                // non-Saved outcome, which the client surfaces as Skipped rather than Failed.
                 if (model.DetectedHash != null)
                 {
-                    // UPDATED: Using the new tracker!
                     if (!duplicateTracker.TryRegisterBatchHash(clientBatchId, model.DetectedHash))
                     {
-                        TryDelete(tempPath);
-                        return BadRequest("Identical file content already uploaded in this batch.");
+                        uploadOutcome = UploadOutcome.DuplicateInBatch;
                     }
-
-                    isDuplicate = await hooks.CheckRemoteDuplicateAsync(model.DetectedHash, ct);
-                    metadata = model.Metadata;
+                    else if (await hooks.CheckRemoteDuplicateAsync(model, ct))
+                    {
+                        // The hook may have described the existing copy on the model.
+                        uploadOutcome = UploadOutcome.DuplicateOnServer;
+                    }
                 }
 
-                if (!isDuplicate)
+                if (uploadOutcome == UploadOutcome.Saved)
                 {
                     await using var finalStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
                     await hooks.SaveFileAsync(model, finalStream, ct);
-                    finalId = model.FinalResourceId;
-                    metadata = model.Metadata;
                 }
-                else
-                {
-                    return BadRequest("File is a remote duplicate.");
-                }
+
+                finalId = model.FinalResourceId;
+                metadata = model.Metadata;
             }
             catch (Exception ex)
             {
@@ -245,7 +261,9 @@ public sealed class UploadsController(
             return StatusCode(500, $"Configuration Error: No IFileUploadServerHooks implementation was registered for context '{uploadContext}'. Please register it in Program.cs.");
         }
 
-        return Ok(new { token = handoffToken, size = file.Length, finalId, metadata});
+        // outcome travels as a string so the response does not depend on the host application's
+        // JSON enum settings, which this library does not control.
+        return Ok(new { token = handoffToken, size = file.Length, finalId, metadata, outcome = uploadOutcome.ToString() });
     }
 
     private static (bool IsValid, string? Error) ValidateTextFile(Stream stream, string extension, HashSet<string>? allowedMimes)

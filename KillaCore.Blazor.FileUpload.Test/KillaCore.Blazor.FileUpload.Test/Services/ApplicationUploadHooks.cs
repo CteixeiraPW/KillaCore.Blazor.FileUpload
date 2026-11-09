@@ -17,18 +17,28 @@ public class ApplicationUploadHooks(
     /// <summary>
     /// Checks the fake database to see if this exact file has already been uploaded previously.
     /// </summary>
-    public Task<bool> CheckRemoteDuplicateAsync(string detectedHash, CancellationToken ct)
+    public Task<bool> CheckRemoteDuplicateAsync(FileTransferData data, CancellationToken ct)
     {
-        // Query the in-memory list
-        bool exists = _fakeDatabase.ContainsKey(detectedHash);
-
-        if (exists && logger.IsEnabled(LogLevel.Information))
+        // The hash the server computed is already on the model
+        if (string.IsNullOrEmpty(data.DetectedHash) ||
+            !_fakeDatabase.TryGetValue(data.DetectedHash, out var existing))
         {
-            logger.LogInformation("Duplicate upload prevented. Hash: {Hash}", detectedHash);
+            // Return synchronously as Task.FromResult since we aren't awaiting a real DB call
+            return Task.FromResult(false);
         }
 
-        // Return synchronously as Task.FromResult since we aren't awaiting a real DB call
-        return Task.FromResult(exists);
+        if (logger.IsEnabled(LogLevel.Information))
+        {
+            logger.LogInformation("Duplicate upload prevented. Hash: {Hash}", data.DetectedHash);
+        }
+
+        // Describe the copy that is already stored, so the UI can link the user to it.
+        // SaveFileAsync is skipped and the file is reported as Skipped, not Failed.
+        data.FinalResourceId = existing.Id.ToString();
+        data.Metadata["PhysicalName"] = existing.PhysicalName;
+        data.Metadata["DuplicateOf"] = existing.OriginalName;
+
+        return Task.FromResult(true);
     }
 
     /// <summary>

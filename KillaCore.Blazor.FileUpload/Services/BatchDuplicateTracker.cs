@@ -5,22 +5,54 @@ namespace KillaCore.Blazor.FileUpload.Services;
 
 internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracker
 {
+    internal const string DefaultContext = "Default";
+
     private static readonly object _tokenUsedMarker = new();
+
+    private static readonly TimeSpan _batchLifespan = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Per-batch state: the content hashes seen so far, plus the upload context that
+    /// owns the batch. The context is captured server-side on the first request of the
+    /// batch so the completion call cannot name a different one.
+    /// </summary>
+    private sealed class BatchState
+    {
+        public ConcurrentDictionary<string, byte> Hashes { get; } = new();
+        public string UploadContext { get; init; } = DefaultContext;
+    }
+
+    private static string BatchKey(string batchId) => $"batch_hashes_{batchId}";
+
+    private BatchState GetOrCreateBatch(string batchId, string uploadContext)
+    {
+        return cache.GetOrCreate(BatchKey(batchId), entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = _batchLifespan;
+            return new BatchState { UploadContext = uploadContext };
+        })!;
+    }
+
+    public void RegisterBatch(string batchId, string uploadContext)
+    {
+        if (string.IsNullOrEmpty(batchId))
+            return;
+
+        GetOrCreateBatch(
+            batchId,
+            string.IsNullOrWhiteSpace(uploadContext) ? DefaultContext : uploadContext);
+    }
 
     public bool TryRegisterBatchHash(string batchId, string fileHash)
     {
         if (string.IsNullOrEmpty(batchId) || string.IsNullOrEmpty(fileHash))
             return true;
 
-        string cacheKey = $"batch_hashes_{batchId}";
+        // The batch is normally created by RegisterBatch earlier in the request;
+        // create defensively so a hash is never silently dropped.
+        var state = GetOrCreateBatch(batchId, DefaultContext);
 
-        var hashSet = cache.GetOrCreate(cacheKey, entry =>
-        {
-            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1);
-            return new ConcurrentDictionary<string, byte>();
-        });
-
-        return hashSet!.TryAdd(fileHash, 1);
+        return state.Hashes.TryAdd(fileHash, 1);
     }
 
     public bool RegisterUsedToken(string secureToken)
@@ -45,16 +77,18 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
         if (string.IsNullOrEmpty(batchId))
             return false;
 
-        return cache.TryGetValue($"batch_hashes_{batchId}", out _);
+        return cache.TryGetValue(BatchKey(batchId), out _);
     }
 
-    public bool TryCompleteBatch(string batchId)
+    public bool TryCompleteBatch(string batchId, out string? uploadContext)
     {
+        uploadContext = null;
+
         if (string.IsNullOrEmpty(batchId))
             return false;
 
-        // Ensure the batch actually had files uploaded
-        if (!IsBatchKnown(batchId))
+        // Ensure the batch actually came through our pipeline
+        if (!cache.TryGetValue(BatchKey(batchId), out BatchState? state) || state is null)
             return false;
 
         // Prevent completing the same batch twice
@@ -63,11 +97,15 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
         bool isNew = false;
         cache.GetOrCreate(completionKey, entry =>
         {
-            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1);
+            entry.AbsoluteExpirationRelativeToNow = _batchLifespan;
             isNew = true;
             return _tokenUsedMarker;
         });
 
-        return isNew;
+        if (!isNew)
+            return false;
+
+        uploadContext = state.UploadContext;
+        return true;
     }
 }

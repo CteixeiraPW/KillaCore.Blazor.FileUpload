@@ -53,7 +53,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         [property: System.Text.Json.Serialization.JsonPropertyName("token")] string Token,
         [property: System.Text.Json.Serialization.JsonPropertyName("size")] long Size,
         [property: System.Text.Json.Serialization.JsonPropertyName("finalId")] string? FinalId,
-        [property: System.Text.Json.Serialization.JsonPropertyName("metadata")] Dictionary<string, string?> Metadata
+        [property: System.Text.Json.Serialization.JsonPropertyName("metadata")] Dictionary<string, string?> Metadata,
+        [property: System.Text.Json.Serialization.JsonPropertyName("outcome")] string? Outcome
     );
 
     // --- LIFECYCLE ---
@@ -96,15 +97,29 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     }
 
     // --- PUBLIC ACTIONS ---
+    /// <summary>
+    /// Cancels any batch still in flight and resets the transfer list.
+    /// </summary>
     public void Clear()
     {
-        if (_batchCts != null && !_batchCts.IsCancellationRequested)
-            _batchCts?.Cancel();
+        // Signal the in-flight producer loop FIRST, so it stops dispatching new files before
+        // anything it depends on is taken away underneath it.
+        if (_batchCts is { IsCancellationRequested: false })
+            _batchCts.Cancel();
+
+        // The superseded source is deliberately not disposed here: the loop it drives may still
+        // be unwinding and holding tokens linked to it. It owns no timer and no unmanaged state,
+        // so it is reclaimed normally once that loop lets go of it.
         _batchCts = new CancellationTokenSource();
 
+        // Disposing a model's IndividualCts while the loop is still linking against it throws
+        // ObjectDisposedException from inside Parallel.ForEachAsync, which then surfaces as a
+        // spurious BatchFailed on the NEXT batch. Only reclaim models that are provably done;
+        // the rest are plain managed objects and are collected once this list drops them.
         foreach (var transfer in _transfers)
         {
-            transfer.Dispose();
+            if (transfer.IsFinished)
+                transfer.Dispose();
         }
 
         _transfers.Clear();
@@ -115,6 +130,11 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     {
         Clear();
 
+        // Two counters, deliberately separate:
+        //  - domIndex is the file's position in the DOM <input> FileList. The JS worker reads
+        //    input.files[Index], so it MUST advance for every file, accepted or skipped.
+        //  - acceptedCount is the MaxFiles budget, and advances only for files we will upload.
+        int domIndex = 0;
         int acceptedCount = 0;
 
         foreach (var file in browserFiles)
@@ -123,11 +143,10 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
             var model = new FileTransferData(file.Name, file.Size, effectiveContentType)
             {
-                Index = acceptedCount,
+                Index = domIndex++,
                 BatchId = _currentBatchId,
                 Status = TransferStatus.Pending,
             };
-            acceptedCount++;
 
             _transfers.Add(model);
 
@@ -171,7 +190,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 }
             }
 
-            if (acceptedCount > Options.MaxFiles)
+            if (acceptedCount >= Options.MaxFiles)
             {
                 model.Status = TransferStatus.Skipped;
                 model.StartTime = DateTime.UtcNow;
@@ -180,6 +199,9 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 await FireEventAsync(EventNotificationType.FileSkipped, model, "Max files reached");
                 continue;
             }
+
+            // Survived every check, so this file consumes one slot of the MaxFiles budget.
+            acceptedCount++;
         }
 
         if (_transfers.All(t => t.IsFinished)) return;
@@ -217,8 +239,17 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         var model = _transfers.FirstOrDefault(x => x.Id == fileId);
         if (model != null && !model.IsFinished)
         {
-            if (model.IndividualCts != null && !model.IndividualCts.IsCancellationRequested)
-                model.IndividualCts.Cancel();
+            try
+            {
+                if (!model.IndividualCts.IsCancellationRequested)
+                    model.IndividualCts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already reclaimed by a concurrent Clear()/dispose. There is no transfer left to
+                // abort, but the status change below still belongs on the model.
+            }
+
             model.Status = TransferStatus.Cancelled;
             model.EndTime = DateTime.UtcNow;
             model.StatusMessage = "Cancelled";
@@ -266,6 +297,15 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, model.IndividualCts.Token);
                 var ct = linkedCts.Token;
 
+                // Captured once so a Clear() that starts a new batch mid-flight cannot retarget
+                // either the upload or its abort.
+                var batchIdAtStart = _currentBatchId;
+
+                // Blazor's interop token only abandons the .NET await, so without this the
+                // browser keeps streaming the whole file after the user has cancelled. Covers
+                // every cancellation path at once: batch cancel, single-file cancel, disposal.
+                using var abortOnCancel = ct.Register(() => AbortTransfer(batchIdAtStart, model.Index));
+
                 try
                 {
                     UpdateStage(model, TransferStage.Uploading, "Uploading...");
@@ -287,7 +327,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                             InputSelector,
                             model.Index,
                             Options.UploadEndpointUrl,
-                            _currentBatchId,
+                            batchIdAtStart,
                             uploadToken,
                             FileUploadConstants.TOKEN_HEADER_NAME,
                             _policyToken,
@@ -299,11 +339,32 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                         {
                             model.FinalResourceId = response.FinalId;
                             model.Metadata = response.Metadata;
-                            model.Stage = TransferStage.Completed; // Assuming you have this enum
-                            model.Status = TransferStatus.Completed; // CRITICAL FIX
+                            model.Stage = TransferStage.Completed;
                             model.EndTime = DateTime.UtcNow;
-                            model.StatusMessage = "Upload complete";
-                            await FireEventAsync(EventNotificationType.FileCompleted, model);
+
+                            // Parsed from a string rather than deserialised as an enum: the host
+                            // application owns the server's JSON options, so the wire stays text.
+                            // An unrecognised value falls back to Saved, matching older servers.
+                            if (!Enum.TryParse(response.Outcome, ignoreCase: true, out UploadOutcome outcome))
+                                outcome = UploadOutcome.Saved;
+
+                            if (outcome == UploadOutcome.Saved)
+                            {
+                                model.Status = TransferStatus.Completed;
+                                model.StatusMessage = "Upload complete";
+                                await FireEventAsync(EventNotificationType.FileCompleted, model);
+                            }
+                            else
+                            {
+                                // The server deliberately declined to store a second copy. That is
+                                // a skip, not a failure — FinalResourceId may point at the copy
+                                // that already exists.
+                                model.Status = TransferStatus.Skipped;
+                                model.StatusMessage = outcome == UploadOutcome.DuplicateInBatch
+                                    ? "Duplicate in batch"
+                                    : "Already on server";
+                                await FireEventAsync(EventNotificationType.FileSkipped, model, model.StatusMessage);
+                            }
                         }
                     }
                 }
@@ -331,10 +392,12 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 // 1. Tell the Server API that the batch is done
                 try
                 {
-                    //only completed files are relevant to the server, failed/skipped/cancelled files are not sent in the notification
-                    var completedTransfers = _transfers.Where(t => t.Status == TransferStatus.Completed).ToList();
+                    // Every transfer in the batch is reported, not just the successful ones: each
+                    // carries its own Status, so hooks can log or notify on failures and skips —
+                    // including a batch in which every single file failed.
+                    var batchTransfers = _transfers.ToList();
 
-                    await ClientService.NotifyBatchCompletedAsync(_currentBatchId, completedTransfers, CancellationToken.None);
+                    await ClientService.NotifyBatchCompletedAsync(_currentBatchId, batchTransfers, CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
@@ -358,11 +421,48 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Fire-and-forget abort of a single browser transfer, invoked from a cancellation callback.
+    /// </summary>
+    private void AbortTransfer(string batchId, int fileIndex)
+    {
+        var module = _jsModule;
+        if (module is null) return;
+
+        _ = AbortTransferAsync(module, batchId, fileIndex);
+    }
+
+    private async Task AbortTransferAsync(IJSObjectReference module, string batchId, int fileIndex)
+    {
+        try
+        {
+            // Deliberately no CancellationToken: the token that triggered this abort is already
+            // cancelled, so passing it would cancel the abort call itself.
+            await module.InvokeVoidAsync("cancelUpload", batchId, fileIndex);
+        }
+        catch (JSDisconnectedException) { /* Blazor Server circuit is gone; nothing to abort */ }
+        catch (ObjectDisposedException) { /* module disposed during teardown */ }
+        catch (Exception ex)
+        {
+            if (Logger.IsEnabled(LogLevel.Debug))
+                Logger.LogDebug("Could not abort transfer {Index}: {Message}", fileIndex, ex.Message);
+        }
+    }
+
     private void UpdateStage(FileTransferData model, TransferStage stage, string msg)
     {
         model.Stage = stage;
         model.StatusMessage = msg;
         model.StageProgressPercent = 0;
+
+        // Move the model out of Pending the moment real work begins. LifecyclePercent returns 0
+        // for anything still Pending, so without this the reported StageProgressPercent is
+        // discarded and the progress bar sits at 0% for the whole transfer, then snaps to 100%.
+        if (!model.IsFinished && stage is not (TransferStage.Pending or TransferStage.Completed))
+        {
+            model.Status = TransferStatus.InProgress;
+        }
+
         _ = FireEventAsync(EventNotificationType.StageChange, model);
     }
 
@@ -392,6 +492,21 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
         if (_batchCts != null && !_batchCts.IsCancellationRequested)
             _batchCts?.Cancel();
+
+        // Stop any in-flight browser transfers deterministically before the JS module goes away.
+        // The per-file cancellation callbacks above are fire-and-forget and would race this
+        // teardown, so the batch sweep is awaited here instead.
+        if (_jsModule is not null && !string.IsNullOrEmpty(_currentBatchId))
+        {
+            try
+            {
+                await _jsModule.InvokeVoidAsync("cancelBatch", _currentBatchId);
+            }
+            catch (JSDisconnectedException) { /* circuit already gone */ }
+            catch (ObjectDisposedException) { /* module already disposed */ }
+            catch (Exception) { /* the page may be unloading; nothing useful to do */ }
+        }
+
         foreach (var transfer in _transfers)
         {
             transfer.Dispose();

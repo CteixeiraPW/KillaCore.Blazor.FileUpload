@@ -1,4 +1,51 @@
 ﻿/**
+ * In-flight XMLHttpRequests, keyed by "batchId:fileIndex".
+ *
+ * Blazor's JS interop CancellationToken only abandons the .NET side of the await — it has no
+ * channel to signal JavaScript. Without this registry a "cancelled" upload keeps streaming
+ * every byte of the file to the server, the server never sees the client give up, and the
+ * server-side CancellationToken never fires.
+ */
+const _inFlight = new Map();
+
+const transferKey = (batchId, fileIndex) => `${batchId}:${fileIndex}`;
+
+/**
+ * Aborts one in-flight transfer. Safe to call for a transfer that already finished, was
+ * already aborted, or never started.
+ * @param {string} batchId - Batch the transfer belongs to
+ * @param {number} fileIndex - Index in the DOM FileList
+ */
+export function cancelUpload(batchId, fileIndex) {
+    const xhr = _inFlight.get(transferKey(batchId, fileIndex));
+    if (xhr) {
+        xhr.abort();
+    }
+}
+
+/**
+ * Aborts every in-flight transfer belonging to a batch. Used on component disposal, where
+ * awaiting one call is more deterministic than relying on per-file cancellation callbacks
+ * that would race the teardown of this module.
+ * @param {string} batchId - Batch to abort
+ * @returns {number} how many transfers were aborted
+ */
+export function cancelBatch(batchId) {
+    const prefix = `${batchId}:`;
+    let aborted = 0;
+
+    // Snapshot the keys first: abort() fires loadend synchronously, which mutates the map.
+    for (const key of [..._inFlight.keys()]) {
+        if (key.startsWith(prefix)) {
+            _inFlight.get(key)?.abort();
+            aborted++;
+        }
+    }
+
+    return aborted;
+}
+
+/**
  * @param {object} dotNetHelper - Reference to C# component to report progress
  * @param {string} inputSelector - DOM ID
  * @param {int} fileIndex - Index in file list
@@ -33,6 +80,14 @@ export function uploadFile(
         formData.append("file", file);
 
         const xhr = new XMLHttpRequest();
+
+        // Register before send() so a cancellation that arrives immediately still finds it.
+        // loadend fires for load, error, abort and timeout alike, so the map cannot leak an
+        // entry per file over a long-lived session.
+        const key = transferKey(batchId, fileIndex);
+        _inFlight.set(key, xhr);
+        xhr.onloadend = () => _inFlight.delete(key);
+
         xhr.open("POST", url, true);
 
         // --- CHANGED: Dynamic Header Names, Policy Injection, and Batch ID ---

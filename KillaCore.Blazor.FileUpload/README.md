@@ -110,11 +110,19 @@ using KillaCore.Blazor.FileUpload.Client.Models;
 
 public class ApplicationUploadHooks : IFileUploadServerHooks
 {
-    // 1. Check if the file already exists (Optional)
-    public Task<bool> CheckRemoteDuplicateAsync(string detectedHash, CancellationToken ct)
+    // 1. Check if this content is already stored (Optional)
+    public Task<bool> CheckRemoteDuplicateAsync(FileTransferData data, CancellationToken ct)
     {
-        // Example: bool exists = _dbContext.Files.Any(f => f.Hash == detectedHash);
-        return Task.FromResult(false); 
+        // The hash the server computed is already on the model
+        var existing = _dbContext.Files.FirstOrDefault(f => f.Hash == data.DetectedHash);
+
+        if (existing is null) return Task.FromResult(false);
+
+        // Describe the copy that already exists so the UI can link the user to it.
+        // SaveFileAsync is skipped and the file is reported as Skipped, NOT as a failure.
+        data.FinalResourceId = existing.Id.ToString();
+
+        return Task.FromResult(true);
     }
 
     // 2. Save the file to your permanent storage
@@ -133,10 +141,15 @@ public class ApplicationUploadHooks : IFileUploadServerHooks
     }
 
     // 3. Fire logic when the whole batch finishes (Emails, Database updates, etc.)
+    //    EVERY transfer in the batch arrives here - successes, failures and skips alike -
+    //    so filter on Status. A batch in which every file failed is reported too.
     public Task OnBatchCompletedAsync(string batchId, IReadOnlyList<FileTransferData> files)
     {
         int successCount = files.Count(f => f.Status == TransferStatus.Completed);
-        Console.WriteLine($"Batch {batchId} finished. {successCount} files saved successfully.");
+        int skippedCount = files.Count(f => f.Status == TransferStatus.Skipped);
+        int failedCount  = files.Count(f => f.Status == TransferStatus.Failed);
+
+        Console.WriteLine($"Batch {batchId}: {successCount} saved, {skippedCount} skipped, {failedCount} failed.");
         return Task.CompletedTask;
     }
 }
@@ -218,8 +231,12 @@ You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` f
 
     private async Task HandleInputOnChange(InputFileChangeEventArgs e)
     {
-        // Pass the files to the processor to begin the pipeline
-        var files = e.GetMultipleFiles(_options.MaxFiles).ToList();
+        // Pass int.MaxValue, NOT MaxFiles. GetMultipleFiles THROWS when the user selects more
+        // files than its cap, and an unhandled throw here tears down an Interactive Server
+        // circuit. Let the processor enforce MaxFiles instead: it marks the extras as Skipped
+        // and raises FileSkipped, so the user is told why. Only file references are
+        // materialised here, so a high ceiling costs nothing.
+        var files = e.GetMultipleFiles(int.MaxValue).ToList();
         if (_processor != null)
         {
             await _processor.ProcessInputFiles(files);
@@ -241,7 +258,7 @@ You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` f
 | Property | Default | Description |
 | :--- | :--- | :--- |
 | `UploadContext` | `"Default"` | The string key used by the API to resolve the specific `IFileUploadServerHooks` implementation via Keyed DI. |
-| `MaxFiles` | `10` | Maximum number of files allowed in a single batch selection. |
+| `MaxFiles` | `10` | Maximum number of files **accepted** per batch. Extras are marked `Skipped` with a `FileSkipped` event rather than rejected outright, so pass `int.MaxValue` to `GetMultipleFiles` and let the component enforce this limit. |
 | `MaxSizeFileBytes` | `50 MB` | Hard size limit per file. Validated instantly on the client. |
 | `AllowedMimeTypes` | `*` (Any) | List of allowed MIME types. Sent securely as an encrypted policy. |
 | `MaxConcurrentUploads` | `5` | Throttle limit for how many parallel XHR network requests are executed. |
