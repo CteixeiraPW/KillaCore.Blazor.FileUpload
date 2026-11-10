@@ -11,7 +11,8 @@
     <Description>The client-side UI components and WebAssembly/Auto support for the KillaCore.Blazor.FileUpload pipeline.</Description>
     <Authors>Carlos Teixeira</Authors>
     <Company>KillaCore</Company>
-    <Version>1.4.0</Version>
+    <Version>2.0.0</Version>
+    <PackageReleaseNotes>2.0.0 - BREAKING. Cancelling an upload now actually aborts the transfer instead of only greying out the UI. The progress bar reports real progress, and a server-processing phase is shown once the bytes have landed. Duplicates are reported as Skipped rather than as errors. New: GetUploadHeadersAsync and SendCredentials, so the file transfer can carry the user's identity. Breaking: IFileUploadClientService methods take FileProcessingOptions, and GetPolicyTokenAsync is replaced by GetEffectiveLimitsAsync - limits are now fetched from the server rather than declared twice; FileProcessingOptions.EnabledFeatures is replaced by the VerifyLocalDuplicates flag; MaxConcurrentProcessors and UIProgressUpdateIntervalMs are removed; AddKillaCoreFileUploadClient returns IHttpClientBuilder. See the README for upgrade notes.</PackageReleaseNotes>
     <Configurations>Debug;Release</Configurations>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>

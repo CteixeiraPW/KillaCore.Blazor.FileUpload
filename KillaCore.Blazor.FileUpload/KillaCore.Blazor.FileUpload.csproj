@@ -10,7 +10,8 @@
 		<Description>A standardized, concurrency-managed file uploader for Blazor.</Description>
 		<Authors>Carlos Teixeira</Authors>
 		<Company>KillaCore</Company>
-		<Version>1.4.0</Version>
+		<Version>2.0.0</Version>
+		<PackageReleaseNotes>2.0.0 - BREAKING. Upload limits (max size, allowed MIME types) move to server configuration and are enforced there, with optional per-context profiles; the client's copies become a fast-fail hint only. The request body is streamed instead of being buffered to disk twice, and a forged signature is rejected after 8KB rather than after the whole file. New: StreamDirectToStorage for a single-write path, IUploadQuarantineStore to hold uploads somewhere other than local disk, IUploadScanner to reject infected files before they reach storage. Breaking: IFileUploadServerHooks.CheckRemoteDuplicateAsync takes FileTransferData; IBatchDuplicateTracker gains RecordFile and TryCompleteBatch reports a BatchCompletion; uploads now respect the host application's authorization FallbackPolicy (set allowAnonymousUploads to opt out); text/html is no longer accepted by default; the per-file ceiling is KillaCoreFileUpload:MaxFileBytes, defaulting to 50MB, replacing a fixed 500MB. See the README for upgrade notes.</PackageReleaseNotes>
 		<Configurations>Debug;Release</Configurations>
 		<PackageIcon>icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
