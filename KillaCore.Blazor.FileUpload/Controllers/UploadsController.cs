@@ -20,7 +20,8 @@ public sealed class UploadsController(
     IFileUploadSecurityService securityService, // 1. Inject Security
     IBatchDuplicateTracker duplicateTracker, // 2. Inject the Batch Duplicate Tracker
     IFileFormatInspector inspector,    // 3. Inject the Magic Number Inspector
-    IServiceProvider serviceProvider,   // 4. Inject Service Provider for Optional Hooks
+    IUploadQuarantineStore quarantine, // 4. Holds the file while it is checked
+    IServiceProvider serviceProvider,   // 5. Inject Service Provider for Optional Hooks
     IOptions<FileUploadServerOptions> options,
     ILogger<UploadsController> logger
     ) : ControllerBase
@@ -339,52 +340,28 @@ public sealed class UploadsController(
         string clientBatchId,
         CancellationToken ct)
     {
-        string folderConfig = options.Value.TempFolder;
-        if (string.IsNullOrWhiteSpace(folderConfig)) folderConfig = "KillaCoreUploads";
-
-        var tempRoot = Path.IsPathRooted(folderConfig)
-            ? folderConfig
-            : Path.Combine(Path.GetTempPath(), folderConfig);
-
-        Directory.CreateDirectory(tempRoot);
-        var tempPath = Path.Combine(tempRoot, $"{Guid.NewGuid():N}.tmp");
+        string? handle = null;
 
         try
         {
-            long total;
+            // The same wrapper the direct path uses. The store consumes the body, and the size and
+            // SHA-256 fall out of how much it read — one pass, wherever the quarantine lives.
+            var body = new HashingReadStream(head.AsMemory(0, headLength), section.Body, limits.MaxFileBytes);
 
-            using (var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            try
             {
-                await using (var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write,
-                                 FileShare.None, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
-                {
-                    // The bytes already read for inspection come first, then the rest of the body.
-                    // Hashing happens on the way past, so there is no second pass over the file.
-                    hasher.AppendData(head.AsSpan(0, headLength));
-                    await fs.WriteAsync(head.AsMemory(0, headLength), ct);
-                    total = headLength;
-
-                    var buffer = new byte[81920];
-                    int read;
-
-                    while ((read = await section.Body.ReadAsync(buffer, ct)) > 0)
-                    {
-                        total += read;
-
-                        // Stop the moment the limit is passed rather than writing the whole file
-                        // and rejecting it afterwards.
-                        if (total > limits.MaxFileBytes)
-                            throw new UploadTooLargeException(limits.MaxFileBytes);
-
-                        hasher.AppendData(buffer.AsSpan(0, read));
-                        await fs.WriteAsync(buffer.AsMemory(0, read), ct);
-                    }
-                }
-
-                model.DetectedHash = Convert.ToHexString(hasher.GetHashAndReset());
+                handle = await quarantine.WriteAsync(model, body, ct);
+                model.FileSize = body.TotalBytesRead;
+                model.DetectedHash = body.ComputedHash;
+            }
+            finally
+            {
+                body.Dispose();
             }
 
-            model.FileSize = total;
+            // Offered to the hook so storage that owns both ends can promote the file with a
+            // server-side copy instead of streaming it back through this process.
+            model.QuarantineHandle = handle;
 
             // A duplicate is NOT an error: the pipeline worked and correctly declined to store a
             // second copy. Both cases are reported as a successful request carrying a non-Saved
@@ -395,17 +372,32 @@ public sealed class UploadsController(
             if (await hooks.CheckRemoteDuplicateAsync(model, ct))
                 return (UploadOutcome.DuplicateOnServer, null);
 
-            await using (var finalStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read,
-                             FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            await using (var content = await quarantine.OpenReadAsync(handle, ct))
             {
-                await hooks.SaveFileAsync(model, finalStream, ct);
+                await hooks.SaveFileAsync(model, content, ct);
             }
 
             return (UploadOutcome.Saved, null);
         }
         finally
         {
-            TryDelete(tempPath);
+            // The handle names an entry that is about to stop existing, so it must not survive
+            // into the batch records the completion hook sees.
+            model.QuarantineHandle = null;
+
+            if (handle is not null)
+            {
+                try
+                {
+                    // Deliberately not the request token: a cancelled upload still has to clean up.
+                    await quarantine.DeleteAsync(handle, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    if (logger.IsEnabled(LogLevel.Warning))
+                        logger.LogWarning(ex, "Could not discard quarantined upload {Handle}.", handle);
+                }
+            }
         }
     }
 
@@ -504,15 +496,6 @@ public sealed class UploadsController(
         }
     }
 
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (System.IO.File.Exists(path))
-                System.IO.File.Delete(path);
-        }
-        catch { /* Swallow cleanup errors */ }
-    }
 
     private static bool IsExtensionValid(string userExt, string detectedExt)
     {

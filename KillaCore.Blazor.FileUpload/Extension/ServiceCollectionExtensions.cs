@@ -55,6 +55,11 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IFileUploadSecurityService, HmacFileUploadSecurityService>();
         services.TryAddSingleton<IBatchDuplicateTracker, BatchDuplicateTracker>();
 
+        // Holds each upload between arrival and acceptance. Registered with TryAdd so an
+        // application can supply its own — backed by S3, Azure Blob or a share — when local
+        // scratch space is the constraint.
+        services.TryAddSingleton<IUploadQuarantineStore, LocalDiskQuarantineStore>();
+
         // Rejects over-sized uploads before model binding buffers the body. Referenced by
         // [ServiceFilter] on the upload action, so it must be resolvable.
         services.TryAddSingleton<RequestSizeGuardFilter>();

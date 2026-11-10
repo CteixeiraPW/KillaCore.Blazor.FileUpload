@@ -28,6 +28,23 @@ public sealed class FileTransferData : IDisposable
     public string? DetectedHash { get; set; }
     public string? FinalResourceId { get; set; }
 
+    /// <summary>
+    /// Where the quarantine store is holding this file while it is checked. Server-side only, and
+    /// valid only for the duration of <c>SaveFileAsync</c> — the entry is discarded afterwards.
+    /// <para>
+    /// Present so a hook whose permanent storage is the same service as the quarantine can promote
+    /// the file with a server-side copy instead of streaming it back through the application. An
+    /// S3-backed hook issues <c>CopyObject</c> on this handle and never touches the stream; one
+    /// that doesn't recognise it simply reads <c>fileStream</c> as usual.
+    /// </para>
+    /// <para>
+    /// Never serialised: it describes internal storage layout and has no meaning in the browser.
+    /// Null when the context streams directly to storage, since there is no quarantine copy.
+    /// </para>
+    /// </summary>
+    [JsonIgnore]
+    public string? QuarantineHandle { get; set; }
+
     // --- Cancellation/UI ---
     public DateTime StartTime { get; set; } // [NEW] Good for calculating speed
     public DateTime? EndTime { get; set; }  // [NEW] Good for analytics

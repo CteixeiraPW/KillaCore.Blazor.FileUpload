@@ -106,7 +106,7 @@ Define the signing key and the upload limits. **The limits are enforced here, no
 | Key | Default | Meaning |
 | :--- | :--- | :--- |
 | `SecretKey` | *required* | Signs the one-time upload tokens. Minimum 16 characters. |
-| `TempFolder` | `KillaCoreUploads` | A bare name lands in the OS temp directory; an absolute path such as `D:\TempUploads` is used as given. |
+| `TempFolder` | `KillaCoreUploads` | Where the **default, local-disk** quarantine holds files while they are checked. A bare name lands in the OS temp directory; an absolute path such as `D:\TempUploads` is used as given. Ignored if you register your own store. |
 | `MaxFileBytes` | 50 MB | Largest accepted file. **This is the authoritative limit.** |
 | `AllowedMimeTypes` | images, PDF, Office | Accepted types, checked against the file's actual content. Omit the key for the built-in list; an empty array means any type. |
 | `MaxRequestBytes` | 500 MB | Transport ceiling for Kestrel and multipart parsing — what aborts an over-sized request mid-stream. Keep at or above the largest per-file limit. |
@@ -128,6 +128,49 @@ The request body is read as a stream either way — nothing is buffered to disk 
 **Direct (`StreamDirectToStorage: true`).** Body → hook. One write. The hash and size are by-products of the hook's own copy, so they exist only *after* it has drained the stream — and with nothing held anywhere, **both duplicate checks are skipped for that context**. Identical content uploaded twice will be stored twice. The stream is forward-only and `Length` throws.
 
 Use direct when storage is remote and your disk is small, and duplicate detection is not something you rely on.
+
+#### Where buffered uploads wait
+
+The quarantine defaults to local disk under `TempFolder` — fast, and right for most applications. It does not scale, though: at peak a server needs *concurrent users x `MaxConcurrentUploads` x file size* of scratch space. Twenty people uploading five 200 MB files at once is 20 GB, on a container that may have two.
+
+Register your own store to move that pressure off the machine:
+
+```csharp
+builder.Services.AddSingleton<IUploadQuarantineStore, S3QuarantineStore>();
+```
+
+Either order works: the built-in is registered with `TryAdd`, and a later registration wins anyway.
+
+```csharp
+public interface IUploadQuarantineStore
+{
+    Task<string> WriteAsync(FileTransferData data, Stream content, CancellationToken ct); // -> handle
+    Task<Stream> OpenReadAsync(string handle, CancellationToken ct);
+    Task DeleteAsync(string handle, CancellationToken ct);
+
+    // Optional: the background janitor calls this. Default does nothing, which is correct for a
+    // store whose backing service expires objects on its own.
+    Task SweepOrphansAsync(TimeSpan maxAge, CancellationToken ct) => Task.CompletedTask;
+}
+```
+
+**Avoid the round trip when both ends are the same service.** A remote quarantine otherwise costs three transfers: into quarantine, back out, and on to permanent storage. The handle is on the model, so a hook can promote the file with a server-side copy and never read the stream at all:
+
+```csharp
+public async Task SaveFileAsync(FileTransferData data, Stream fileStream, CancellationToken ct)
+{
+    if (data.QuarantineHandle is { } handle && handle.StartsWith("s3://"))
+    {
+        await _s3.CopyObjectAsync(/* quarantine -> permanent */);   // metadata only, no bytes move
+        return;
+    }
+
+    await using var fs = File.Create(destination);
+    await fileStream.CopyToAsync(fs, ct);
+}
+```
+
+`QuarantineHandle` is valid only for the duration of `SaveFileAsync`, is never serialised to the browser, and is null for a context that streams directly to storage.
 
 **The client-side limits still exist** on `FileProcessingOptions`, as a fallback for the moment before the server's limits are fetched. Stricter than the server is fine — the user is simply told sooner. Looser only wastes bandwidth: the file transfers in full and is then rejected.
 
