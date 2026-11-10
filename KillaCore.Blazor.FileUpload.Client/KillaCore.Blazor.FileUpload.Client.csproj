@@ -23,7 +23,6 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
-    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
@@ -43,15 +42,5 @@
     <None Include="icon.png" Pack="true" PackagePath="\" />
     <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
-
-  <Target Name="PublishNugetPackage" AfterTargets="Pack" Condition="'$(Configuration)'=='Release'">
-    <PropertyGroup>
-      <NuGetApiKey>$(NUGET_API_KEY)</NuGetApiKey>
-      <NuGetSource>https://api.nuget.org/v3/index.json</NuGetSource>
-      <PackageFile>$(BaseOutputPath)$(Configuration)\$(PackageId).$(PackageVersion).nupkg</PackageFile>
-    </PropertyGroup>
-    <Message Text="--- Pushing NuGet Package: $(PackageFile) ---" Importance="high" />
-    <Exec Command="dotnet nuget push &quot;$(PackageFile)&quot; --source &quot;$(NuGetSource)&quot; --api-key &quot;$(NuGetApiKey)&quot; --skip-duplicate" />
-  </Target>
 
 </Project>

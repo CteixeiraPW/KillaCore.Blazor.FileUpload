@@ -1,0 +1,62 @@
+# Publishes both packages to nuget.org using Trusted Publishing (OIDC).
+#
+# There is no API key stored anywhere. GitHub issues a short-lived OIDC token, nuget.org
+# validates it against the Trusted Publishing policy registered for this repository, and
+# returns a temporary key valid for one hour. Each token can be exchanged exactly once.
+#
+# The nuget.org policy must name THIS file by name only: publish.yml
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'          # publishing is a deliberate act: git tag v2.0.0 && git push --tags
+  workflow_dispatch:   # or run it by hand from the Actions tab
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write  # required: lets the job request the OIDC token nuget.org exchanges
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore KillaCore.Blazor.FileUpload.slnx
+
+      - name: Build
+        run: dotnet build KillaCore.Blazor.FileUpload.slnx -c Release --no-restore
+
+      # Nothing is published if the suite fails. This is the step that makes a tag safe.
+      - name: Test
+        run: dotnet test KillaCore.Blazor.FileUpload.Tests/KillaCore.Blazor.FileUpload.Tests.csproj -c Release --no-build
+
+      - name: Pack
+        run: |
+          dotnet pack KillaCore.Blazor.FileUpload/KillaCore.Blazor.FileUpload.csproj -c Release --no-build -o artifacts
+          dotnet pack KillaCore.Blazor.FileUpload.Client/KillaCore.Blazor.FileUpload.Client.csproj -c Release --no-build -o artifacts
+
+      - name: List packages
+        run: ls -l artifacts
+
+      # Deliberately the last thing before the push: the temporary key lives for one hour, so
+      # requesting it earlier risks it expiring behind a slow build.
+      - name: NuGet login (OIDC -> temporary API key)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}   # nuget.org PROFILE NAME, not an email address
+
+      - name: Push
+        run: >
+          dotnet nuget push "artifacts/*.nupkg"
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
