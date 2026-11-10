@@ -12,6 +12,7 @@ This library solves the fundamental issue of Blazor SignalR message size limits 
 * **End-to-End Security:**
   * **Anti-Replay Tokens:** Uses short-lived, one-time-use secure tokens to prevent unauthorized API access.
   * **Server-Authoritative Limits:** File size and allowed MIME types live in server configuration and are enforced there, with optional per-context profiles. The client holds matching values only to fail fast; it cannot widen them.
+  * **Quarantine & Scanning:** Files are held in a pluggable quarantine while they are checked — local disk by default, or your own S3 / Azure store when scratch space is scarce — where an optional `IUploadScanner` can reject them before they are ever reachable.
   * **Magic Number Inspection:** Validates actual file content headers on the server, ensuring users cannot bypass security by renaming file extensions.
 * **Extensible Server Hooks:** A clean `IFileUploadServerHooks` interface allows you to execute custom logic (saving to DB, AWS S3, Azure Blob, or local disk) without altering the core pipeline.
 * **Resiliency & Cancellation:** Full support for `CancellationToken` propagation. Cancelling a batch in the UI immediately halts network requests and server-side saving operations.
@@ -164,6 +165,36 @@ public async Task SaveFileAsync(FileTransferData data, Stream fileStream, Cancel
 ```
 
 `QuarantineHandle` is valid only for the duration of `SaveFileAsync`, is never serialised to the browser, and is null for a context that streams directly to storage.
+
+#### Scanning uploads
+
+Register an `IUploadScanner` and every file is examined while it sits in quarantine — after the duplicate checks, before `SaveFileAsync`. That is the only moment a file exists in full and is still unreachable, which is the whole reason the quarantine is there.
+
+```csharp
+builder.Services.AddKeyedSingleton<IUploadScanner, ClamAvScanner>("Documents");
+// or unkeyed, to scan every context:
+builder.Services.AddSingleton<IUploadScanner, ClamAvScanner>();
+```
+
+```csharp
+public async Task<ScanResult> ScanAsync(FileTransferData data, Stream content, CancellationToken ct)
+{
+    var verdict = await _clam.SendAndScanFileAsync(content, ct);
+
+    return verdict.Result == ClamScanResults.VirusDetected
+        ? ScanResult.Infected(verdict.InfectedFiles[0].VirusName)
+        : ScanResult.Clean;
+}
+```
+
+A rejected file never reaches storage. The component shows it as **Failed** with the threat name — not `Skipped`, which is reserved for a file that was declined because it was already safely held. The batch records keep it with its server-computed hash, so you can log exactly what you turned away.
+
+Two behaviours worth knowing before you deploy it:
+
+* **A scanner that throws rejects the upload.** If the scanning service is unreachable, files are refused rather than waved through, because the alternative is accepting unscanned files at precisely the moment the defence is down. To accept during an outage instead, catch inside your scanner and return `ScanResult.Clean` — an explicit choice rather than an accident.
+* **Scanning and `StreamDirectToStorage` are mutually exclusive**, and configuring both **stops the application at startup** with a message naming the context. Direct mode keeps no quarantine copy, so the only way to scan would be to write the file to storage and delete it afterwards — leaving a window in which an infected file is live and possibly already linked. A silently unscanned path is worse than a failed boot.
+
+If your scanner and your quarantine share a backend, read `data.QuarantineHandle` and scan the object in place rather than streaming it back through the application.
 
 **The client-side limits still exist** on `FileProcessingOptions`, as a fallback for the moment before the server's limits are fetched. Stricter than the server is fine — the user is simply told sooner. Looser only wastes bandwidth: the file transfers in full and is then rejected.
 

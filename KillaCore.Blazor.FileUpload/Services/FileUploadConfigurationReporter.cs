@@ -1,4 +1,5 @@
 using KillaCore.Blazor.FileUpload.Models;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -23,10 +24,13 @@ internal sealed record FileUploadConfigState(string SectionName, bool LimitsConf
 internal sealed class FileUploadConfigurationReporter(
     IOptions<FileUploadServerOptions> options,
     FileUploadConfigState state,
+    IServiceProvider serviceProvider,
     ILogger<FileUploadConfigurationReporter> logger) : IHostedService
 {
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        GuardUnscannableContexts();
+
         var limits = options.Value.GetEffectiveLimits(null);
 
         if (!state.LimitsConfigured)
@@ -65,6 +69,44 @@ internal sealed class FileUploadConfigurationReporter(
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Refuses to start when a context both streams directly to storage and has a scanner.
+    /// <para>
+    /// Direct mode keeps no quarantine copy, so there is nothing for a scanner to examine before
+    /// the file is live. Starting anyway would store unscanned files while the configuration
+    /// looked like it was scanning them — a failure nobody notices until it matters. Better to
+    /// fail here, where the message is read.
+    /// </para>
+    /// </summary>
+    private void GuardUnscannableContexts()
+    {
+        var o = options.Value;
+
+        foreach (var (context, direct) in EnumerateContexts(o))
+        {
+            if (!direct) continue;
+
+            var scanner = serviceProvider.GetKeyedService<IUploadScanner>(context)
+                          ?? serviceProvider.GetService<IUploadScanner>();
+
+            if (scanner is null) continue;
+
+            throw new InvalidOperationException(
+                $"Upload context '{context}' sets StreamDirectToStorage and also resolves an " +
+                $"IUploadScanner ({scanner.GetType().Name}). Direct mode holds no quarantine copy, " +
+                "so the file cannot be scanned before it reaches storage. Either turn off " +
+                "StreamDirectToStorage for this context, or do not register a scanner for it.");
+        }
+    }
+
+    private static IEnumerable<(string Context, bool Direct)> EnumerateContexts(FileUploadServerOptions o)
+    {
+        yield return ("Default", o.StreamDirectToStorage);
+
+        foreach (var profile in o.Profiles)
+            yield return (profile.Key, profile.Value.StreamDirectToStorage ?? o.StreamDirectToStorage);
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

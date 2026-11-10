@@ -62,7 +62,9 @@ public enum UploadOutcome
     [Description("Duplicate In Batch")]
     DuplicateInBatch,         // Identical content already uploaded in this same batch
     [Description("Duplicate On Server")]
-    DuplicateOnServer         // Already present in the application's permanent storage
+    DuplicateOnServer,        // Already present in the application's permanent storage
+    [Description("Infected")]
+    Infected                  // Rejected by IUploadScanner; never reached permanent storage
 }
 
 public enum TransferStatus

@@ -83,7 +83,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
         [property: System.Text.Json.Serialization.JsonPropertyName("size")] long Size,
         [property: System.Text.Json.Serialization.JsonPropertyName("finalId")] string? FinalId,
         [property: System.Text.Json.Serialization.JsonPropertyName("metadata")] Dictionary<string, string?> Metadata,
-        [property: System.Text.Json.Serialization.JsonPropertyName("outcome")] string? Outcome
+        [property: System.Text.Json.Serialization.JsonPropertyName("outcome")] string? Outcome,
+        [property: System.Text.Json.Serialization.JsonPropertyName("outcomeDetail")] string? OutcomeDetail
     );
 
     // --- LIFECYCLE ---
@@ -421,22 +422,33 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                             if (!Enum.TryParse(response.Outcome, ignoreCase: true, out UploadOutcome outcome))
                                 outcome = UploadOutcome.Saved;
 
-                            if (outcome == UploadOutcome.Saved)
+                            switch (outcome)
                             {
-                                model.Status = TransferStatus.Completed;
-                                model.StatusMessage = "Upload complete";
-                                await FireEventAsync(EventNotificationType.FileCompleted, model);
-                            }
-                            else
-                            {
+                                case UploadOutcome.Saved:
+                                    model.Status = TransferStatus.Completed;
+                                    model.StatusMessage = "Upload complete";
+                                    await FireEventAsync(EventNotificationType.FileCompleted, model);
+                                    break;
+
+                                // Rejected, not declined. A duplicate means the content was
+                                // already safe on the server; this means it never will be, and
+                                // the user needs the reason rather than a quiet skip.
+                                case UploadOutcome.Infected:
+                                    model.Status = TransferStatus.Failed;
+                                    model.StatusMessage = response.OutcomeDetail ?? "Rejected by virus scan";
+                                    await FireEventAsync(EventNotificationType.FileFailed, model, model.StatusMessage);
+                                    break;
+
                                 // The server deliberately declined to store a second copy. That is
                                 // a skip, not a failure — FinalResourceId may point at the copy
                                 // that already exists.
-                                model.Status = TransferStatus.Skipped;
-                                model.StatusMessage = outcome == UploadOutcome.DuplicateInBatch
-                                    ? "Duplicate in batch"
-                                    : "Already on server";
-                                await FireEventAsync(EventNotificationType.FileSkipped, model, model.StatusMessage);
+                                default:
+                                    model.Status = TransferStatus.Skipped;
+                                    model.StatusMessage = outcome == UploadOutcome.DuplicateInBatch
+                                        ? "Duplicate in batch"
+                                        : "Already on server";
+                                    await FireEventAsync(EventNotificationType.FileSkipped, model, model.StatusMessage);
+                                    break;
                             }
                         }
                     }

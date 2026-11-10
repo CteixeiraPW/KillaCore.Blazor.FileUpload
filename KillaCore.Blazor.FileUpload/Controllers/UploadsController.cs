@@ -148,6 +148,14 @@ public sealed class UploadsController(
         => serviceProvider.GetKeyedService<IFileUploadServerHooks>(uploadContext)
            ?? serviceProvider.GetService<IFileUploadServerHooks>();
 
+    /// <summary>
+    /// Resolves the optional scanner for a context, by the same keyed-then-fallback rule as the
+    /// hooks. Null means this context is not scanned.
+    /// </summary>
+    private IUploadScanner? ResolveScanner(string uploadContext)
+        => serviceProvider.GetKeyedService<IUploadScanner>(uploadContext)
+           ?? serviceProvider.GetService<IUploadScanner>();
+
     // Deliberately carries NO [AllowAnonymous]: hard-coding it would override the host
     // application's authorization fallback policy, leaving this endpoint open in an app that had
     // locked everything else down, with no way for the consumer to close it. Apps that want
@@ -258,6 +266,7 @@ public sealed class UploadsController(
         };
 
         var uploadOutcome = UploadOutcome.Saved;
+        string? outcomeDetail = null;
 
         try
         {
@@ -281,9 +290,13 @@ public sealed class UploadsController(
             }
             else
             {
-                var outcome = await ProcessBufferedAsync(section!, head, headLength, model, limits, hooks, clientBatchId, ct);
-                if (outcome.Rejection is not null) return outcome.Rejection;
-                uploadOutcome = outcome.Outcome;
+                var result = await ProcessBufferedAsync(
+                    section!, head, headLength, model, limits, hooks,
+                    ResolveScanner(uploadContext), clientBatchId, ct);
+                if (result.Rejection is not null) return result.Rejection;
+
+                uploadOutcome = result.Outcome;
+                outcomeDetail = result.Detail;
             }
         }
         catch (UploadTooLargeException ex)
@@ -303,9 +316,16 @@ public sealed class UploadsController(
 
         // The server's own record of this file, so OnBatchCompletedAsync reports server-computed
         // values such as the hash rather than whatever the client chose to send back.
-        model.Status = uploadOutcome == UploadOutcome.Saved
-            ? TransferStatus.Completed
-            : TransferStatus.Skipped;
+        // A duplicate is a benign skip; an infected file is a failure. The distinction matters to
+        // anyone reading the batch records afterwards.
+        model.Status = uploadOutcome switch
+        {
+            UploadOutcome.Saved => TransferStatus.Completed,
+            UploadOutcome.Infected => TransferStatus.Failed,
+            _ => TransferStatus.Skipped
+        };
+
+        model.StatusMessage = outcomeDetail ?? model.StatusMessage;
 
         duplicateTracker.RecordFile(clientBatchId, model);
 
@@ -317,9 +337,16 @@ public sealed class UploadsController(
             size = model.FileSize,
             finalId = model.FinalResourceId,
             metadata = model.Metadata,
-            outcome = uploadOutcome.ToString()
+            outcome = uploadOutcome.ToString(),
+            outcomeDetail
         });
     }
+
+    /// <summary>Outcome of the buffered path, plus anything worth telling the user about it.</summary>
+    private sealed record BufferedResult(
+        UploadOutcome Outcome,
+        IActionResult? Rejection = null,
+        string? Detail = null);
 
     /// <summary>
     /// The buffered path: stream the body into <c>TempFolder</c>, hashing as it goes, then run the
@@ -330,13 +357,14 @@ public sealed class UploadsController(
     /// becomes reachable.
     /// </para>
     /// </summary>
-    private async Task<(UploadOutcome Outcome, IActionResult? Rejection)> ProcessBufferedAsync(
+    private async Task<BufferedResult> ProcessBufferedAsync(
         MultipartSection section,
         byte[] head,
         int headLength,
         FileTransferData model,
         EffectiveUploadLimits limits,
         IFileUploadServerHooks hooks,
+        IUploadScanner? scanner,
         string clientBatchId,
         CancellationToken ct)
     {
@@ -367,17 +395,36 @@ public sealed class UploadsController(
             // second copy. Both cases are reported as a successful request carrying a non-Saved
             // outcome, which the client surfaces as Skipped rather than Failed.
             if (!duplicateTracker.TryRegisterBatchHash(clientBatchId, model.DetectedHash))
-                return (UploadOutcome.DuplicateInBatch, null);
+                return new BufferedResult(UploadOutcome.DuplicateInBatch);
 
             if (await hooks.CheckRemoteDuplicateAsync(model, ct))
-                return (UploadOutcome.DuplicateOnServer, null);
+                return new BufferedResult(UploadOutcome.DuplicateOnServer);
+
+            // Scanned here and nowhere else: the only moment the file exists in full and is still
+            // unreachable. After the duplicate checks, so nothing is scanned that was never going
+            // to be stored. A scanner that throws rejects the upload rather than waving it on.
+            if (scanner is not null)
+            {
+                await using var toScan = await quarantine.OpenReadAsync(handle, ct);
+                var verdict = await scanner.ScanAsync(model, toScan, ct);
+
+                if (!verdict.IsClean)
+                {
+                    var threat = string.IsNullOrWhiteSpace(verdict.Threat) ? "unspecified" : verdict.Threat;
+
+                    if (logger.IsEnabled(LogLevel.Warning))
+                        logger.LogWarning("Rejected infected upload {FileName} ({Threat}).", model.FileName, threat);
+
+                    return new BufferedResult(UploadOutcome.Infected, Detail: $"Rejected by virus scan: {threat}");
+                }
+            }
 
             await using (var content = await quarantine.OpenReadAsync(handle, ct))
             {
                 await hooks.SaveFileAsync(model, content, ct);
             }
 
-            return (UploadOutcome.Saved, null);
+            return new BufferedResult(UploadOutcome.Saved);
         }
         finally
         {

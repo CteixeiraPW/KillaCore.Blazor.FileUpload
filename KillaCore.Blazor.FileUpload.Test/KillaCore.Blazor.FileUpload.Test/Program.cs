@@ -13,6 +13,10 @@ builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);
 // 2. Register the DEFAULT hook (Fallback if no X-Upload-Context header is sent)
 builder.Services.AddKeyedScoped<IFileUploadServerHooks, ApplicationUploadHooks>("TestUpload");
 
+// 2b. Scan the quarantined copy before it reaches storage. Keyed the same way as the hooks, so
+// only this context is scanned.
+builder.Services.AddKeyedSingleton<IUploadScanner, MarkerUploadScanner>("TestUpload");
+
 // 3. Register the frontend UI services (from your Client package)
 // When the component renders on the server via SignalR, it needs an absolute URL to call its own API.
 builder.Services.AddKillaCoreFileUploadClient();
