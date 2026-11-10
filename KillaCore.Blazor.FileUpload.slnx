@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/Solution Items/">
     <File Path=".gitattributes" />
+    <File Path=".github/workflows/publish.yml" />
     <File Path=".gitignore" />
     <File Path="LICENSE.txt" />
     <File Path="README.md" />
