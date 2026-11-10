@@ -6,6 +6,8 @@ using KillaCore.Blazor.FileUpload.Models;
 using KillaCore.Blazor.FileUpload.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.WebUtilities;
+using System.Security.Cryptography;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -62,28 +64,79 @@ public sealed class UploadsController(
         // Security: Verify this batch actually had files uploaded through our pipeline.
         // The upload context comes from the server-side batch record, not from the caller,
         // so a completion request cannot route itself to a different set of hooks.
-        if (!duplicateTracker.TryCompleteBatch(batchId, out var batchUploadContext))
+        if (!duplicateTracker.TryCompleteBatch(batchId, out var completion) || completion is null)
         {
             logger.LogWarning("Rejected batch completion for unknown or already-completed batch: {BatchId}", batchId);
             return BadRequest("Batch not found or already completed.");
         }
 
-        var hooks = ResolveHooks(batchUploadContext ?? DEFAULT_UPLOAD_CONTEXT);
+        var hooks = ResolveHooks(completion.UploadContext);
 
         if (hooks != null)
         {
-            // Execute the developer's server-side logic (e.g., updating database records, 
+            // Execute the developer's server-side logic (e.g., updating database records,
             // sending an email summary, or triggering an AI processor)
-            await hooks.OnBatchCompletedAsync(batchId, files);
+            await hooks.OnBatchCompletedAsync(batchId, MergeBatchRecords(files, completion.ServerRecords));
         }
 
         return Ok();
+    }
+
+    /// <summary>
+    /// The client posts the batch's file list, but only the server knows what became of the files
+    /// that actually arrived — the SHA-256 above all, which is computed server-side and never sent
+    /// back. Echoing the client's own copy would mean trusting a value the server is supposed to
+    /// be establishing, so server records win wherever they exist.
+    /// <para>
+    /// Client entries survive only for files it skipped locally and never sent, which the server
+    /// has no record of at all.
+    /// </para>
+    /// </summary>
+    private static IReadOnlyList<FileTransferData> MergeBatchRecords(
+        IReadOnlyList<FileTransferData> clientFiles,
+        IReadOnlyList<FileTransferData> serverRecords)
+    {
+        if (serverRecords.Count == 0) return clientFiles;
+
+        var byId = serverRecords.ToDictionary(f => f.Id, StringComparer.Ordinal);
+        var merged = new List<FileTransferData>(clientFiles.Count);
+        var matched = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var clientFile in clientFiles)
+        {
+            if (byId.TryGetValue(clientFile.Id, out var serverFile))
+            {
+                merged.Add(serverFile);
+                matched.Add(serverFile.Id);
+            }
+            else
+            {
+                merged.Add(clientFile);
+            }
+        }
+
+        // A file the server processed but the client never reported — a batch cancelled in the
+        // browser mid-flight, say — still belongs in the hook's view of what happened.
+        foreach (var serverFile in serverRecords)
+        {
+            if (!matched.Contains(serverFile.Id))
+                merged.Add(serverFile);
+        }
+
+        return merged;
     }
 
     // List of extensions that do not have "Magic Numbers" and must be validated by content
     private static readonly HashSet<string> _textExtensions = [".txt", ".md", ".markdown", ".json", ".csv", ".xml", ".html", ".css", ".js"];
 
     private const string DEFAULT_UPLOAD_CONTEXT = "Default";
+
+    /// <summary>
+    /// How much of the file is held in memory for the signature and text checks. Magic numbers
+    /// live in the first few bytes and the text scan only ever looked at 4KB, so a forged file is
+    /// rejected after this much rather than after its full length.
+    /// </summary>
+    private const int INSPECTION_HEAD_BYTES = 8 * 1024;
 
     /// <summary>
     /// Resolves the developer's hooks for a given upload context, falling back to a
@@ -100,7 +153,8 @@ public sealed class UploadsController(
     // anonymous uploads ask for them via AddKillaCoreFileUploadServer(allowAnonymousUploads: true).
     [HttpPost("temp")]
     [ServiceFilter(typeof(RequestSizeGuardFilter))]
-    public async Task<IActionResult> UploadTemp([FromForm] IFormFile file, CancellationToken ct)
+    [DisableFormValueModelBinding]
+    public async Task<IActionResult> UploadTemp(CancellationToken ct)
     {
         // --- STEP 1: SECURITY & REPLAY CHECK ---
 
@@ -136,36 +190,155 @@ public sealed class UploadsController(
             ? null // an empty list means any type
             : new HashSet<string>(limits.AllowedMimeTypes, StringComparer.OrdinalIgnoreCase);
 
-        // --- STEP 3: CONTENT INSPECTION (The "Is it Real?" check) ---
+        // --- STEP 3: FIND THE FILE PART ---
 
-        if (file == null || file.Length == 0) return BadRequest("Empty file.");
+        // Read the body ourselves rather than binding an IFormFile. Model binding would buffer
+        // every byte to disk before this method ran, so the whole file was written once before
+        // anything could look at it — including a file whose signature was about to be rejected.
+        var boundary = MultipartRequestHelper.GetBoundary(Request.ContentType);
+        if (boundary is null)
+            return BadRequest("Expected a multipart/form-data request with a valid boundary.");
 
-        // The authoritative size check. RequestSizeGuardFilter already turned away anything whose
-        // declared Content-Length was over the limit, but that header is advisory — absent on
-        // chunked requests — so the real length is checked here as well.
-        if (file.Length > limits.MaxFileBytes)
+        var reader = new MultipartReader(boundary, Request.Body);
+
+        MultipartSection? section;
+        string fileName = string.Empty;
+
+        while ((section = await reader.ReadNextSectionAsync(ct)) is not null)
         {
-            return StatusCode(StatusCodes.Status413PayloadTooLarge,
-                $"File exceeds the {limits.MaxFileBytes:N0} byte limit for this upload.");
+            if (MultipartRequestHelper.IsFileSection(section, out fileName))
+                break;
         }
 
-        var userExtension = Path.GetExtension(file.FileName).ToLowerInvariant();
+        if (section is null)
+            return BadRequest("No file part found in the request.");
 
-        using (var streamCheck = file.OpenReadStream())
+        var contentType = section.ContentType ?? "application/octet-stream";
+        var userExtension = Path.GetExtension(fileName).ToLowerInvariant();
+
+        // --- STEP 4: INSPECT THE HEAD, BEFORE A SINGLE BYTE IS STORED ---
+
+        // Signatures live in the first few bytes, and the text check only ever looked at the
+        // first 4KB. Reading just the head means a forged file costs 8KB instead of its full size.
+        var head = new byte[INSPECTION_HEAD_BYTES];
+        int headLength = await section.Body.ReadAtLeastAsync(head, head.Length, throwOnEndOfStream: false, ct);
+
+        if (headLength == 0)
+            return BadRequest("Empty file.");
+
+        using (var headStream = new MemoryStream(head, 0, headLength, writable: false))
         {
-            if (_textExtensions.Contains(userExtension))
+            var (IsValid, Error) = _textExtensions.Contains(userExtension)
+                ? ValidateTextFile(headStream, userExtension, allowedMimeTypes)
+                : ValidateBinarySignature(headStream, fileName, allowedMimeTypes);
+
+            if (!IsValid) return BadRequest(Error);
+        }
+
+        // --- STEP 5: HANDOVER & EXECUTE HOOKS ---
+
+        IFileUploadServerHooks? hooks = ResolveHooks(uploadContext);
+
+        if (hooks is null)
+        {
+            return StatusCode(500, $"Configuration Error: No IFileUploadServerHooks implementation was registered for context '{uploadContext}'. Please register it in Program.cs.");
+        }
+
+        var handoffToken = Guid.NewGuid().ToString("N");
+
+        var model = new FileTransferData
+        {
+            // The client's own id, carried in the signed token. Using it rather than a fresh GUID
+            // lets the batch-completion hook join the server's records to the client's list.
+            Id = string.IsNullOrEmpty(fileId) ? handoffToken : fileId,
+            FileName = fileName,
+            MimeType = contentType,
+            BatchId = clientBatchId
+        };
+
+        var uploadOutcome = UploadOutcome.Saved;
+
+        try
+        {
+            if (limits.StreamDirectToStorage)
             {
-                var (IsValid, Error) = ValidateTextFile(streamCheck, userExtension, allowedMimeTypes);
-                if (!IsValid) return BadRequest(Error);
+                // One write, straight to the hook's storage. The hash and the size are by-products
+                // of the hook's own copy, so neither exists until it has drained the stream — and
+                // with nothing buffered there is nothing to check a duplicate against beforehand.
+                var body = new HashingReadStream(head.AsMemory(0, headLength), section.Body, limits.MaxFileBytes);
+
+                try
+                {
+                    await hooks.SaveFileAsync(model, body, ct);
+                    model.FileSize = body.TotalBytesRead;
+                    model.DetectedHash = body.ComputedHash;
+                }
+                finally
+                {
+                    body.Dispose();
+                }
             }
             else
             {
-                var (IsValid, Error) = ValidateBinarySignature(streamCheck, file.FileName, allowedMimeTypes);
-                if (!IsValid) return BadRequest(Error);
+                var outcome = await ProcessBufferedAsync(section!, head, headLength, model, limits, hooks, clientBatchId, ct);
+                if (outcome.Rejection is not null) return outcome.Rejection;
+                uploadOutcome = outcome.Outcome;
             }
         }
+        catch (UploadTooLargeException ex)
+        {
+            return StatusCode(StatusCodes.Status413PayloadTooLarge, ex.Message);
+        }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(499); // Client closed request
+        }
+        catch (Exception ex)
+        {
+            if (logger.IsEnabled(LogLevel.Error))
+                logger.LogError(ex, "Error processing uploaded file for context '{Context}'", uploadContext);
+            return BadRequest("Server processing error.");
+        }
 
-        // --- STEP 4: SAVE TO DISK (Standard Logic) ---
+        // The server's own record of this file, so OnBatchCompletedAsync reports server-computed
+        // values such as the hash rather than whatever the client chose to send back.
+        model.Status = uploadOutcome == UploadOutcome.Saved
+            ? TransferStatus.Completed
+            : TransferStatus.Skipped;
+
+        duplicateTracker.RecordFile(clientBatchId, model);
+
+        // outcome travels as a string so the response does not depend on the host application's
+        // JSON enum settings, which this library does not control.
+        return Ok(new
+        {
+            token = handoffToken,
+            size = model.FileSize,
+            finalId = model.FinalResourceId,
+            metadata = model.Metadata,
+            outcome = uploadOutcome.ToString()
+        });
+    }
+
+    /// <summary>
+    /// The buffered path: stream the body into <c>TempFolder</c>, hashing as it goes, then run the
+    /// duplicate checks and hand the completed file to the hook.
+    /// <para>
+    /// The temp file is what makes "decide before writing" possible — a duplicate is declined
+    /// without ever reaching storage — and it is the natural place to scan a file before it
+    /// becomes reachable.
+    /// </para>
+    /// </summary>
+    private async Task<(UploadOutcome Outcome, IActionResult? Rejection)> ProcessBufferedAsync(
+        MultipartSection section,
+        byte[] head,
+        int headLength,
+        FileTransferData model,
+        EffectiveUploadLimits limits,
+        IFileUploadServerHooks hooks,
+        string clientBatchId,
+        CancellationToken ct)
+    {
         string folderConfig = options.Value.TempFolder;
         if (string.IsNullOrWhiteSpace(folderConfig)) folderConfig = "KillaCoreUploads";
 
@@ -174,103 +347,66 @@ public sealed class UploadsController(
             : Path.Combine(Path.GetTempPath(), folderConfig);
 
         Directory.CreateDirectory(tempRoot);
-        var tempId = $"{Guid.NewGuid():N}.tmp";
-        var tempPath = Path.Combine(tempRoot, tempId);
+        var tempPath = Path.Combine(tempRoot, $"{Guid.NewGuid():N}.tmp");
 
         try
         {
-            await using var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
-            await file.CopyToAsync(fs, ct);
-        }
-        catch (OperationCanceledException)
-        {
-            TryDelete(tempPath);
-            return StatusCode(499); // Client closed request
-        }
-        catch (Exception ex)
-        {
-            TryDelete(tempPath);
-            if(logger.IsEnabled(LogLevel.Error))
-                logger.LogError(ex, "Error saving uploaded file to disk.");
-            return Problem("An internal error occurred while saving the file.");
+            long total;
 
-        }
-
-        // --- STEP 5: HANDOVER & EXECUTE HOOKS ---
-        var handoffToken = Guid.NewGuid().ToString("N");
-        Dictionary<string, string?> metadata = [];
-
-        IFileUploadServerHooks? hooks = ResolveHooks(uploadContext);
-
-        string? finalId = null;
-        var uploadOutcome = UploadOutcome.Saved;
-
-        if (hooks != null)
-        {
-            var model = new FileTransferData
+            using (var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
             {
-                Id = handoffToken,
-                FileName = file.FileName,
-                FileSize = file.Length,
-                MimeType = file.ContentType ?? "application/octet-stream",
-                BatchId = clientBatchId
-            };
-
-            try
-            {
-                using (var hashStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read))
-                using (var sha256 = System.Security.Cryptography.SHA256.Create())
+                await using (var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write,
+                                 FileShare.None, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
                 {
-                    var hashBytes = await sha256.ComputeHashAsync(hashStream, ct);
-                    model.DetectedHash = Convert.ToHexString(hashBytes);
-                }
+                    // The bytes already read for inspection come first, then the rest of the body.
+                    // Hashing happens on the way past, so there is no second pass over the file.
+                    hasher.AppendData(head.AsSpan(0, headLength));
+                    await fs.WriteAsync(head.AsMemory(0, headLength), ct);
+                    total = headLength;
 
-                // A duplicate is NOT an error: the pipeline worked and correctly declined to store
-                // a second copy. Both cases are reported as a successful request carrying a
-                // non-Saved outcome, which the client surfaces as Skipped rather than Failed.
-                if (model.DetectedHash != null)
-                {
-                    if (!duplicateTracker.TryRegisterBatchHash(clientBatchId, model.DetectedHash))
+                    var buffer = new byte[81920];
+                    int read;
+
+                    while ((read = await section.Body.ReadAsync(buffer, ct)) > 0)
                     {
-                        uploadOutcome = UploadOutcome.DuplicateInBatch;
-                    }
-                    else if (await hooks.CheckRemoteDuplicateAsync(model, ct))
-                    {
-                        // The hook may have described the existing copy on the model.
-                        uploadOutcome = UploadOutcome.DuplicateOnServer;
+                        total += read;
+
+                        // Stop the moment the limit is passed rather than writing the whole file
+                        // and rejecting it afterwards.
+                        if (total > limits.MaxFileBytes)
+                            throw new UploadTooLargeException(limits.MaxFileBytes);
+
+                        hasher.AppendData(buffer.AsSpan(0, read));
+                        await fs.WriteAsync(buffer.AsMemory(0, read), ct);
                     }
                 }
 
-                if (uploadOutcome == UploadOutcome.Saved)
-                {
-                    await using var finalStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
-                    await hooks.SaveFileAsync(model, finalStream, ct);
-                }
+                model.DetectedHash = Convert.ToHexString(hasher.GetHashAndReset());
+            }
 
-                finalId = model.FinalResourceId;
-                metadata = model.Metadata;
-            }
-            catch (Exception ex)
+            model.FileSize = total;
+
+            // A duplicate is NOT an error: the pipeline worked and correctly declined to store a
+            // second copy. Both cases are reported as a successful request carrying a non-Saved
+            // outcome, which the client surfaces as Skipped rather than Failed.
+            if (!duplicateTracker.TryRegisterBatchHash(clientBatchId, model.DetectedHash))
+                return (UploadOutcome.DuplicateInBatch, null);
+
+            if (await hooks.CheckRemoteDuplicateAsync(model, ct))
+                return (UploadOutcome.DuplicateOnServer, null);
+
+            await using (var finalStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read,
+                             FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
             {
-                if(logger.IsEnabled(LogLevel.Error))
-                    logger.LogError(ex, "Error processing uploaded file for context '{Context}'", uploadContext);
-                return BadRequest($"Server processing error.");
+                await hooks.SaveFileAsync(model, finalStream, ct);
             }
-            finally
-            {
-                TryDelete(tempPath);
-            }
+
+            return (UploadOutcome.Saved, null);
         }
-        else
+        finally
         {
-            // --- CLEANED UP: FAIL FAST MECHANISM ---
             TryDelete(tempPath);
-            return StatusCode(500, $"Configuration Error: No IFileUploadServerHooks implementation was registered for context '{uploadContext}'. Please register it in Program.cs.");
         }
-
-        // outcome travels as a string so the response does not depend on the host application's
-        // JSON enum settings, which this library does not control.
-        return Ok(new { token = handoffToken, size = file.Length, finalId, metadata, outcome = uploadOutcome.ToString() });
     }
 
     private static (bool IsValid, string? Error) ValidateTextFile(Stream stream, string extension, HashSet<string>? allowedMimes)

@@ -116,12 +116,22 @@ public class ApplicationUploadHooks(
     public Task OnBatchCompletedAsync(string batchId, IReadOnlyList<FileTransferData> files)
     {
         int successCount = files.Count(f => f.Status == TransferStatus.Completed);
+        int skippedCount = files.Count(f => f.Status == TransferStatus.Skipped);
         int failedCount = files.Count(f => f.Status == TransferStatus.Failed);
 
         if (logger.IsEnabled(LogLevel.Information))
         {
-            logger.LogInformation("Batch {BatchId} completed. {Success} saved, {Failed} failed. Total files in system history: {TotalDb}",
-                batchId, successCount, failedCount, _fakeDatabase.Count);
+            logger.LogInformation("Batch {BatchId} completed. {Success} saved, {Skipped} skipped, {Failed} failed. Total files in system history: {TotalDb}",
+                batchId, successCount, skippedCount, failedCount, _fakeDatabase.Count);
+
+            // DetectedHash is computed server-side and never travels to the browser. It reaches
+            // this hook because the server keeps its own record of every file that arrived,
+            // rather than trusting the list the client posts back at completion time.
+            foreach (var f in files)
+            {
+                logger.LogInformation("   {Name}: status={Status} size={Size} hash={Hash}",
+                    f.FileName, f.Status, f.FileSize, f.DetectedHash ?? "(none, never reached the server)");
+            }
         }
 
         return Task.CompletedTask;

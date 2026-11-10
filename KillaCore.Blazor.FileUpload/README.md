@@ -110,9 +110,24 @@ Define the signing key and the upload limits. **The limits are enforced here, no
 | `MaxFileBytes` | 50 MB | Largest accepted file. **This is the authoritative limit.** |
 | `AllowedMimeTypes` | images, PDF, Office | Accepted types, checked against the file's actual content. Omit the key for the built-in list; an empty array means any type. |
 | `MaxRequestBytes` | 500 MB | Transport ceiling for Kestrel and multipart parsing — what aborts an over-sized request mid-stream. Keep at or above the largest per-file limit. |
+| `StreamDirectToStorage` | `false` | Hand `SaveFileAsync` the request body itself instead of a completed temp file. See *Buffered or direct* below. |
 | `Profiles` | none | Per-context overrides. |
 
-**Profiles** are keyed by the component's `UploadContext`, the same key that selects your `IFileUploadServerHooks`. A context with no profile uses the root values, and a profile may override the size, the types, or both. The client chooses among the profiles *you* defined; it cannot describe one.
+**Profiles** are keyed by the component's `UploadContext`, the same key that selects your `IFileUploadServerHooks`. A context with no profile uses the root values, and a profile may override the size, the types, the streaming mode, or any combination. The client chooses among the profiles *you* defined; it cannot describe one.
+
+#### Buffered or direct
+
+The request body is read as a stream either way — nothing is buffered to disk before validation, and a file whose signature is wrong is rejected after 8 KB rather than after its full length. What differs is where the bytes go.
+
+**Buffered (default).** Body → `TempFolder` → hook. The SHA-256 is computed on the way past, so there is no second pass. Costs one extra write and read, and buys three things:
+
+* a seekable stream with a known `Length` for `SaveFileAsync` — which S3 and Azure SDKs use to choose single-part vs multipart
+* the hash and file size **before** saving, so `CheckRemoteDuplicateAsync` can run
+* the ability to decline a file without having written it anywhere
+
+**Direct (`StreamDirectToStorage: true`).** Body → hook. One write. The hash and size are by-products of the hook's own copy, so they exist only *after* it has drained the stream — and with nothing held anywhere, **both duplicate checks are skipped for that context**. Identical content uploaded twice will be stored twice. The stream is forward-only and `Length` throws.
+
+Use direct when storage is remote and your disk is small, and duplicate detection is not something you rely on.
 
 **The client-side limits still exist** on `FileProcessingOptions`, as a fallback for the moment before the server's limits are fetched. Stricter than the server is fine — the user is simply told sooner. Looser only wastes bandwidth: the file transfers in full and is then rejected.
 
@@ -165,6 +180,10 @@ public class ApplicationUploadHooks : IFileUploadServerHooks
     // 3. Fire logic when the whole batch finishes (Emails, Database updates, etc.)
     //    EVERY transfer in the batch arrives here - successes, failures and skips alike -
     //    so filter on Status. A batch in which every file failed is reported too.
+    //
+    //    For files that reached the server these are the SERVER's records, so DetectedHash and
+    //    FileSize are the values it computed, not whatever the browser sent back. Files the
+    //    client skipped locally never reached the server, so their DetectedHash is null.
     public Task OnBatchCompletedAsync(string batchId, IReadOnlyList<FileTransferData> files)
     {
         int successCount = files.Count(f => f.Status == TransferStatus.Completed);

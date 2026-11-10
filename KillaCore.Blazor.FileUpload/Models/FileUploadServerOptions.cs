@@ -11,12 +11,21 @@ public class UploadProfile
 
     /// <summary>Accepted MIME types. Null inherits the root list; empty means any type.</summary>
     public List<string>? AllowedMimeTypes { get; set; }
+
+    /// <summary>Stream straight to final storage for this context. Null inherits the root value.</summary>
+    public bool? StreamDirectToStorage { get; set; }
 }
 
 /// <summary>The limits that actually apply to a given upload context.</summary>
 /// <param name="MaxFileBytes">Largest accepted file, in bytes.</param>
 /// <param name="AllowedMimeTypes">Accepted MIME types; an empty list means any type.</param>
-public sealed record EffectiveUploadLimits(long MaxFileBytes, IReadOnlyList<string> AllowedMimeTypes);
+/// <param name="StreamDirectToStorage">
+/// Whether the hook receives the request body itself rather than a completed temp file.
+/// </param>
+public sealed record EffectiveUploadLimits(
+    long MaxFileBytes,
+    IReadOnlyList<string> AllowedMimeTypes,
+    bool StreamDirectToStorage);
 
 public class FileUploadServerOptions
 {
@@ -80,6 +89,23 @@ public class FileUploadServerOptions
     public long MaxRequestBytes { get; set; } = 1024L * 1024L * 500L;
 
     /// <summary>
+    /// Hand <c>SaveFileAsync</c> the request body itself instead of writing a temp file first.
+    /// <para>
+    /// The fast path: one write, to your storage, with the hash computed as the hook reads. The
+    /// buffered default costs an extra write and read, and buys three things this gives up —
+    /// a seekable stream with a known <c>Length</c>, a hash and file size known <i>before</i>
+    /// saving, and the chance to decline a file without having written it.
+    /// </para>
+    /// <para>
+    /// Duplicate detection is therefore skipped entirely for a context in this mode: both checks
+    /// exist to decide something before the save, and there is no longer a before. For the same
+    /// reason it cannot be combined with scanning the file prior to storage — there is no
+    /// quarantine copy to scan.
+    /// </para>
+    /// </summary>
+    public bool StreamDirectToStorage { get; set; }
+
+    /// <summary>
     /// Per-context overrides, keyed by the client's <c>UploadContext</c> — the same key that
     /// selects the <c>IFileUploadServerHooks</c> implementation. Most applications leave this
     /// empty and configure the root values only.
@@ -108,6 +134,7 @@ public class FileUploadServerOptions
 
         return new EffectiveUploadLimits(
             profile?.MaxFileBytes ?? MaxFileBytes,
-            allowedTypes);
+            allowedTypes,
+            profile?.StreamDirectToStorage ?? StreamDirectToStorage);
     }
 }

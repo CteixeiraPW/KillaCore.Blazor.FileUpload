@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Caching.Memory;
+﻿using KillaCore.Blazor.FileUpload.Client.Models;
+using Microsoft.Extensions.Caching.Memory;
 using System.Collections.Concurrent;
 
 namespace KillaCore.Blazor.FileUpload.Services;
@@ -35,6 +36,11 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
     private sealed class BatchState
     {
         public ConcurrentDictionary<string, byte> Hashes { get; } = new();
+
+        /// <summary>The server's own record of each processed file, keyed by its Id.</summary>
+        public ConcurrentDictionary<string, FileTransferData> Files { get; } =
+            new(StringComparer.Ordinal);
+
         public string UploadContext { get; init; } = DefaultContext;
     }
 
@@ -70,6 +76,15 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
         GetOrCreateBatch(
             batchId,
             string.IsNullOrWhiteSpace(uploadContext) ? DefaultContext : uploadContext);
+    }
+
+    public void RecordFile(string batchId, FileTransferData data)
+    {
+        if (string.IsNullOrEmpty(batchId) || string.IsNullOrEmpty(data.Id))
+            return;
+
+        var state = GetOrCreateBatch(batchId, DefaultContext);
+        state.Files[data.Id] = data;
     }
 
     public bool TryRegisterBatchHash(string batchId, string fileHash)
@@ -108,9 +123,9 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
         return cache.TryGetValue(BatchKey(batchId), out _);
     }
 
-    public bool TryCompleteBatch(string batchId, out string? uploadContext)
+    public bool TryCompleteBatch(string batchId, out BatchCompletion? completion)
     {
-        uploadContext = null;
+        completion = null;
 
         if (string.IsNullOrEmpty(batchId))
             return false;
@@ -126,7 +141,11 @@ internal class BatchDuplicateTracker(IMemoryCache cache) : IBatchDuplicateTracke
                 return false;
 
             cache.Set(CompletionKey(batchId), _usedMarker, _batchLifespan);
-            uploadContext = state.UploadContext;
+
+            completion = new BatchCompletion(
+                state.UploadContext,
+                [.. state.Files.Values]);
+
             return true;
         }
     }
