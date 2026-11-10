@@ -28,9 +28,9 @@ jobs:
       id-token: write  # required: lets the job request the OIDC token nuget.org exchanges
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
@@ -58,7 +58,14 @@ jobs:
         id: login
         uses: NuGet/login@v1
         with:
-          user: ${{ secrets.NUGET_USER }}   # nuget.org PROFILE NAME, not an email address
+          # The nuget.org username of whoever CREATED the trusted publishing policy - not the
+          # package owner, which may be an organisation. A mismatch returns HTTP 401
+          # "No matching trust policy owned by user".
+          #
+          # Prefer the variable: it is not secret (it is printed on every package page), and a
+          # secret is masked as *** in the logs, which hides the one value you need to read when
+          # this fails. The secret is kept as a fallback so either setup works.
+          user: ${{ vars.NUGET_USER || secrets.NUGET_USER }}
 
       - name: Push
         run: >
