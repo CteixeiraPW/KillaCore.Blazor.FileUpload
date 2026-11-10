@@ -495,5 +495,17 @@ Upload tokens are signed with your shared `SecretKey`, so any server can verify 
 What *is* per-process is the anti-replay and in-batch duplicate state, held in `IMemoryCache`. Behind a load balancer each server keeps its own, so a one-time token could be replayed once per server, and in-batch duplicate detection only sees the files that happened to land on the same node. Either enable sticky sessions, or register your own `IBatchDuplicateTracker` backed by a distributed store with an atomic insert-if-absent such as Redis `SET NX` — the interface is public for exactly that reason.
 
 ---
+## 🧪 Tests
+
+```bash
+dotnet test KillaCore.Blazor.FileUpload.Tests
+```
+
+35 tests, under a second. They drive a real ASP.NET host over `TestServer` rather than calling the controller directly, because most of what is worth checking lives in the parts a direct call skips: multipart parsing, the filter that rejects over-sized requests before model binding, the authorization fallback policy, and configuration binding.
+
+They cover the limits and profiles, token replay, signature spoofing, duplicate detection in both modes, scanning, the batch-record merge, and the configurations that are refused at startup.
+
+---
+
 ## 📄 License
 MIT License.

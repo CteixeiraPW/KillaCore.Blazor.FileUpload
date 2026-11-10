@@ -1,4 +1,5 @@
 using KillaCore.Blazor.FileUpload.Controllers;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc.ApplicationModels;
 using Microsoft.AspNetCore.Mvc.Authorization;
 
@@ -22,9 +23,19 @@ internal sealed class AllowAnonymousUploadsConvention : IActionModelConvention
 {
     public void Apply(ActionModel action)
     {
-        if (action.Controller.ControllerType.AsType() == typeof(UploadsController))
-        {
-            action.Filters.Add(new AllowAnonymousFilter());
-        }
+        if (action.Controller.ControllerType.AsType() != typeof(UploadsController))
+            return;
+
+        // This has to reach ENDPOINT METADATA, not just the filter collection. Under endpoint
+        // routing the fallback policy is applied by AuthorizationMiddleware, which looks for
+        // IAllowAnonymous in the endpoint's metadata and never consults MVC's filter pipeline —
+        // so an AllowAnonymousFilter on its own leaves the endpoint behind the very policy it
+        // was meant to opt out of, while looking like it had worked.
+        foreach (var selector in action.Selectors)
+            selector.EndpointMetadata.Add(new AllowAnonymousAttribute());
+
+        // Kept as well, for an [Authorize] enforced through MVC's own AuthorizeFilter rather
+        // than the middleware.
+        action.Filters.Add(new AllowAnonymousFilter());
     }
 }
