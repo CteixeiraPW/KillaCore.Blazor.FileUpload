@@ -5,6 +5,7 @@
 # returns a temporary key valid for one hour. Each token can be exchanged exactly once.
 #
 # The nuget.org policy must name THIS file by name only: publish.yml
+# and its Environment field must be: release
 name: Publish
 
 on:
@@ -16,6 +17,11 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+
+    # Pauses here until a required reviewer approves. Put "release" in the Environment field
+    # of the nuget.org policy as well: that is what turns this from a GitHub-side convention
+    # into a constraint, since a token minted outside this environment then fails to match.
+    environment: release
 
     permissions:
       contents: read
