@@ -11,7 +11,7 @@ This library solves the fundamental issue of Blazor SignalR message size limits 
 * **Multi-Tier Duplicate Detection:** Saves bandwidth and server resources by intelligently skipping identical files within the same batch using instant client-side heuristics and server-side SHA-256 cryptographic hashing.
 * **End-to-End Security:**
   * **Anti-Replay Tokens:** Uses short-lived, one-time-use secure tokens to prevent unauthorized API access.
-  * **Encrypted Policies:** Uses `IDataProtection` to encrypt validation rules (like Allowed MIME types) so they cannot be tampered with on the client.
+  * **Server-Authoritative Limits:** File size and allowed MIME types live in server configuration and are enforced there, with optional per-context profiles. The client holds matching values only to fail fast; it cannot widen them.
   * **Magic Number Inspection:** Validates actual file content headers on the server, ensuring users cannot bypass security by renaming file extensions.
 * **Extensible Server Hooks:** A clean `IFileUploadServerHooks` interface allows you to execute custom logic (saving to DB, AWS S3, Azure Blob, or local disk) without altering the core pipeline.
 * **Resiliency & Cancellation:** Full support for `CancellationToken` propagation. Cancelling a batch in the UI immediately halts network requests and server-side saving operations.
@@ -53,7 +53,7 @@ Your setup depends on your Blazor hosting model.
     builder.Services.AddControllers();
     
     // 2. Register KillaCore Packages
-    builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);;
+    builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);
     builder.Services.AddKillaCoreFileUploadClient(); // If prerendering Client components
     
     // 3. Register your custom server hooks using Keyed DI!
@@ -71,7 +71,7 @@ Since everything runs on one machine, register everything in your single `Progra
 ```csharp
 builder.Services.AddControllers();
 
-builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);;
+builder.Services.AddKillaCoreFileUploadServer(builder.Configuration);
 builder.Services.AddKillaCoreFileUploadClient();
 
 builder.Services.AddScoped<IFileUploadServerHooks, ApplicationUploadHooks>();
@@ -84,21 +84,43 @@ app.MapControllers(); // Ensure this is before app.Run()
 ```
 
 ### 4. Configure `appsettings.json` (Server Project)
-You must define a secure key for generating Anti-Replay tokens, and optionally specify where temporary files should be stored during the upload process.
+Define the signing key and the upload limits. **The limits are enforced here, not in the browser** — the component's matching options only decide how quickly a user is told.
 
 ```json
 {
   "KillaCoreFileUpload": {
     "SecretKey": "Your-Super-Secure-Secret-Key-Min-16-Chars",
-    "TempFolder": "KillaCoreUploads" 
+    "TempFolder": "KillaCoreUploads",
+
+    "MaxFileBytes": 52428800,
+    "AllowedMimeTypes": [ "image/jpeg", "image/png", "application/pdf" ],
+    "MaxRequestBytes": 524288000,
+
+    "Profiles": {
+      "Photos": { "MaxFileBytes": 10485760, "AllowedMimeTypes": [ "image/jpeg", "image/png" ] }
+    }
   }
 }
 ```
-*Note: If `TempFolder` is just a name, it will be placed in the OS temp directory. You can also provide an absolute path like `D:\TempUploads`.*
+
+| Key | Default | Meaning |
+| :--- | :--- | :--- |
+| `SecretKey` | *required* | Signs the one-time upload tokens. Minimum 16 characters. |
+| `TempFolder` | `KillaCoreUploads` | A bare name lands in the OS temp directory; an absolute path such as `D:\TempUploads` is used as given. |
+| `MaxFileBytes` | 50 MB | Largest accepted file. **This is the authoritative limit.** |
+| `AllowedMimeTypes` | images, PDF, Office | Accepted types, checked against the file's actual content. Omit the key for the built-in list; an empty array means any type. |
+| `MaxRequestBytes` | 500 MB | Transport ceiling for Kestrel and multipart parsing — what aborts an over-sized request mid-stream. Keep at or above the largest per-file limit. |
+| `Profiles` | none | Per-context overrides. |
+
+**Profiles** are keyed by the component's `UploadContext`, the same key that selects your `IFileUploadServerHooks`. A context with no profile uses the root values, and a profile may override the size, the types, or both. The client chooses among the profiles *you* defined; it cannot describe one.
+
+**The client-side limits still exist** on `FileProcessingOptions`, as a fallback for the moment before the server's limits are fetched. Stricter than the server is fine — the user is simply told sooner. Looser only wastes bandwidth: the file transfers in full and is then rejected.
+
+Omit the limit keys entirely and the built-in defaults apply, with a warning logged at startup so the fallback is never silent.
 
 ---
 
-### 4. Implement Server Hooks (Your Custom Logic)
+### 5. Implement Server Hooks (Your Custom Logic)
 
 The package handles the networking, validation, and temporary file creation automatically. However, **you** must tell the application what to do with the files once they safely reach your server.
 
@@ -254,8 +276,8 @@ You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` f
 | :--- | :--- | :--- |
 | `UploadContext` | `"Default"` | The string key used by the API to resolve the specific `IFileUploadServerHooks` implementation via Keyed DI. |
 | `MaxFiles` | `10` | Maximum number of files **accepted** per batch. Extras are marked `Skipped` with a `FileSkipped` event rather than rejected outright, so pass `int.MaxValue` to `GetMultipleFiles` and let the component enforce this limit. |
-| `MaxSizeFileBytes` | `50 MB` | Hard size limit per file. Validated instantly on the client. |
-| `AllowedMimeTypes` | images, PDF, Office formats | Types the client accepts, also sent to the server as the upload policy. An empty list means any type. `text/html` is **not** included by default — see *Serving uploaded content* below. |
+| `MaxSizeFileBytes` | `50 MB` | Fallback for fast UI feedback, used until the server's limit is fetched. The server's `MaxFileBytes` is the real limit. |
+| `AllowedMimeTypes` | images, PDF, Office formats | Fallback for fast UI feedback, used until the server's list is fetched. The server's `AllowedMimeTypes` is the real rule. `text/html` is **not** in either default — see *Serving uploaded content* below. |
 | `MaxConcurrentUploads` | `5` | Throttle limit for how many parallel XHR network requests are executed. |
 | `VerifyLocalDuplicates` | `true` | Skip a file when an earlier file in the same selection has the same name and size. A client-side convenience only — the server rejects duplicate **content** by SHA-256 either way. |
 | `UploadContext` | `"Default"` | Selects which keyed `IFileUploadServerHooks` handles the batch. Must match the key used in `AddKeyedScoped`. |
@@ -338,8 +360,11 @@ If you serve uploaded files back to users, do at least one of the following, whi
 This is the consuming application's responsibility: the package never serves files, so it cannot do it for you.
 
 ### IIS & Web Server Request Limits
-By default, ASP.NET Kestrel and IIS block HTTP POST requests larger than **30MB**. Even though this component supports 500MB+ configurations, your web server will reject the request with a `413 Payload Too Large` error before it ever reaches the `UploadsController`.
-* **IIS (`web.config`):** You must increase the `maxAllowedContentLength`.
+By default, ASP.NET Kestrel and IIS block HTTP POST requests larger than **30MB**, and will reject the request with `413 Payload Too Large` before it ever reaches the `UploadsController`.
+
+**Kestrel and multipart parsing are handled for you** — `AddKillaCoreFileUploadServer` applies `MaxRequestBytes` from your configuration to both, so raising that one key is enough. (It replaces a hardcoded 500MB ceiling that could not be changed at all.)
+
+**IIS is not**, because its request filter runs in native code before ASP.NET sees the request. Raise `maxAllowedContentLength` to at least your `MaxRequestBytes`:
 
 ```xml
 <security>
@@ -348,7 +373,8 @@ By default, ASP.NET Kestrel and IIS block HTTP POST requests larger than **30MB*
   </requestFiltering>
 </security>
 ```
-* **Kestrel (`Program.cs`):** You must configure `MaxRequestBodySize` on the Kestrel server options.
+
+A `413` carrying a message names the limit that rejected it; a `413` with an empty body came from IIS or Kestrel before the application was reached.
 
 ### Cross-Origin Deployments (standalone WASM + separate API)
 
@@ -361,7 +387,7 @@ private readonly FileProcessingOptions _options = new()
 };
 ```
 
-Sending them all to one host is not a convenience, it is a requirement: the upload token and the encrypted policy are signed by one server and verified by the same one, so splitting them across two hosts fails with a signature or `CryptographicException` error.
+Sending them all to one host is not a convenience, it is a requirement: the upload token is signed by one server and verified by the same one, and the limits must come from the server that enforces them. Splitting them across two hosts fails on the token signature.
 
 You must also allow the package's headers in the API's CORS policy, or the browser's preflight fails before anything is uploaded. The list is exposed so you don't have to keep it in sync by hand:
 
@@ -380,7 +406,9 @@ Add `.AllowCredentials()` **only** if you also set `SendCredentials` on the comp
 > Leave `ServerBaseUrl` null when the app and the API are the same project. Routes then stay relative, which also keeps apps hosted under a sub-path such as `https://host/apps/myapp/` working.
 
 ### Web Farms & Docker Swarm
-This package relies on `IDataProtectionProvider` to encrypt upload policies. If you deploy your API across multiple servers or load balancers, you **must** configure a centralized Data Protection key ring (e.g., storing keys in Redis, Azure Blob Storage, or a shared network folder). If Server A encrypts the policy and the Load Balancer routes the file transfer to Server B, the upload will fail with a `CryptographicException` if Server B does not share the same decryption key.
+Upload tokens are signed with your shared `SecretKey`, so any server can verify a token another one issued. There is no Data Protection key ring to synchronise.
+
+What *is* per-process is the anti-replay and in-batch duplicate state, held in `IMemoryCache`. Behind a load balancer each server keeps its own, so a one-time token could be replayed once per server, and in-batch duplicate detection only sees the files that happened to land on the same node. Either enable sticky sessions, or register your own `IBatchDuplicateTracker` backed by a distributed store with an atomic insert-if-absent such as Redis `SET NX` — the interface is public for exactly that reason.
 
 ---
 ## 📄 License

@@ -53,9 +53,7 @@ export function cancelBatch(batchId) {
  * @param {string} batchId - Current Batch ID
  * @param {string} uploadToken - The Anti-Replay/Auth Token (X-Upload-Token)
  * @param {string} tokenHeaderName - Name of the Auth Header
- * @param {string} policyToken - The Encrypted Allowed Extensions (X-Upload-Policy)
- * @param {string} policyHeaderName - Name of the Policy Header
- * @param {string} uploadContext - Selects the server-side hook
+ * @param {string} uploadContext - Selects the server-side hook and the limits profile
  * @param {{headers?: Object<string,string>, withCredentials?: boolean}} auth - Caller-supplied
  *        authentication for the transfer. The pipeline's own token identifies the pipeline, not
  *        the user, so bearer-token applications pass an Authorization header here.
@@ -68,8 +66,6 @@ export function uploadFile(
     batchId,
     uploadToken,
     tokenHeaderName,
-    policyToken,
-    policyHeaderName,
     uploadContext,
     auth
 ) {
@@ -101,9 +97,7 @@ export function uploadFile(
             xhr.withCredentials = true;
         }
 
-        // --- CHANGED: Dynamic Header Names, Policy Injection, and Batch ID ---
         xhr.setRequestHeader(tokenHeaderName, uploadToken);
-        xhr.setRequestHeader(policyHeaderName, policyToken);
         xhr.setRequestHeader("X-Batch-Id", batchId);
         xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
 
@@ -117,7 +111,6 @@ export function uploadFile(
         if (auth?.headers) {
             const reserved = new Set([
                 String(tokenHeaderName).toLowerCase(),
-                String(policyHeaderName).toLowerCase(),
                 "x-batch-id",
                 "x-upload-context",
                 "x-requested-with"
@@ -147,9 +140,15 @@ export function uploadFile(
         };
 
         xhr.onload = function () {
-            // 1. Check for specific IIS/Server errors first
+            // 413 arrives from two very different places: this API rejecting an over-sized file
+            // against its configured limit, which carries an explanatory body, or IIS/Kestrel
+            // refusing the request before it reached the app at all, which carries none. Prefer
+            // the server's own words and only fall back to the infrastructure hint.
             if (xhr.status === 413) {
-                reject("Upload Blocked (413). If you are using IIS, you must increase 'maxAllowedContentLength' in web.config.");
+                const body = (xhr.responseText || "").replace(/^"|"$/g, '').trim();
+                reject(body.length > 0
+                    ? body
+                    : "Upload blocked (413) before reaching the application. On IIS raise 'maxAllowedContentLength' in web.config; otherwise raise KillaCoreFileUpload:MaxRequestBytes.");
                 return;
             }
 

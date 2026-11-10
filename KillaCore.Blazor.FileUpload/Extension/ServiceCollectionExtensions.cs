@@ -20,8 +20,24 @@ public static class ServiceCollectionExtensions
         string configSectionName = FileUploadServerOptions.DefaultConfigSectionName,
         bool allowAnonymousUploads = false)
     {
+        var section = configuration.GetSection(configSectionName);
+
         // 1. Bind the appsettings.json section to our strongly-typed class
-        services.Configure<FileUploadServerOptions>(configuration.GetSection( configSectionName));
+        services.Configure<FileUploadServerOptions>(section);
+
+        // The transport ceiling has to be read eagerly: FormOptions and Kestrel are configured
+        // here, before any IOptions instance can be resolved.
+        var bound = new FileUploadServerOptions();
+        section.Bind(bound);
+
+        // Whether the developer said anything at all about limits, so startup can warn when the
+        // built-in defaults are silently in force.
+        bool limitsConfigured =
+            section.GetSection(nameof(FileUploadServerOptions.MaxFileBytes)).Exists() ||
+            section.GetSection(nameof(FileUploadServerOptions.AllowedMimeTypes)).Exists() ||
+            section.GetSection(nameof(FileUploadServerOptions.Profiles)).Exists();
+
+        services.TryAddSingleton(new FileUploadConfigState(configSectionName, limitsConfigured));
 
         // 2. Register FileSignatures (The "Universal Inspector")
         var allFormats = typeof(FileFormat)
@@ -39,8 +55,13 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IFileUploadSecurityService, HmacFileUploadSecurityService>();
         services.TryAddSingleton<IBatchDuplicateTracker, BatchDuplicateTracker>();
 
-        // 4. The Janitor Service (Background Cleanup)
+        // Rejects over-sized uploads before model binding buffers the body. Referenced by
+        // [ServiceFilter] on the upload action, so it must be resolvable.
+        services.TryAddSingleton<RequestSizeGuardFilter>();
+
+        // 4. The Janitor Service (Background Cleanup) and the startup limit report
         services.AddHostedService<TempFileCleanupService>();
+        services.AddHostedService<FileUploadConfigurationReporter>();
 
         // 5. Register Controller Discovery
         //    The upload endpoints inherit whatever authorization the host application has set up,
@@ -53,19 +74,20 @@ public static class ServiceCollectionExtensions
                 })
                 .AddApplicationPart(typeof(UploadsController).Assembly);
 
-        // 6. Configure Form Options
+        // 6. Transport ceiling, from configuration rather than a hardcoded constant. This is what
+        //    actually aborts an over-sized request mid-stream; the per-profile MaxFileBytes is a
+        //    policy check on a request the server already agreed to read.
         services.Configure<FormOptions>(options =>
         {
-            options.MultipartBodyLengthLimit = 524_288_000;
+            options.MultipartBodyLengthLimit = bound.MaxRequestBytes;
         });
 
-        // 7. Configure Kestrel
         services.Configure<KestrelServerOptions>(options =>
         {
-            options.Limits.MaxRequestBodySize = 524_288_000;
+            options.Limits.MaxRequestBodySize = bound.MaxRequestBytes;
         });
 
-        // 8. Optional: UserId enforcement filter for authenticated apps
+        // 7. Optional: UserId enforcement filter for authenticated apps
         if (userIdEnforcement)
         {
             services.AddScoped<EnforceAuthenticatedUserFilter>();

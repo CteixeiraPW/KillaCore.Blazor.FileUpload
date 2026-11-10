@@ -19,14 +19,15 @@ public class DefaultFileUploadClientService : IFileUploadClientService
         _httpClient.BaseAddress ??= new Uri(navManager.BaseUri);
     }
 
-    public async Task<string> GetPolicyTokenAsync(FileProcessingOptions options, CancellationToken ct)
+    public async Task<UploadLimits?> GetEffectiveLimitsAsync(FileProcessingOptions options, CancellationToken ct)
     {
-        var response = await _httpClient.PostAsJsonAsync(
-            options.ResolveApiUrl("policy"), options.AllowedMimeTypes, ct);
+        var route = options.ResolveApiUrl(
+            $"policy/{Uri.EscapeDataString(options.UploadContext)}");
+
+        var response = await _httpClient.GetAsync(route, ct);
 
         response.EnsureSuccessStatusCode();
-        var result = await response.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken: ct);
-        return result?.Token ?? string.Empty;
+        return await response.Content.ReadFromJsonAsync<UploadLimits>(cancellationToken: ct);
     }
 
     public async Task<string> GetUploadTokenAsync(FileProcessingOptions options, string fileId, string userId, CancellationToken ct)

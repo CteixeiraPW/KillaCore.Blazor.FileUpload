@@ -73,10 +73,10 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
     private DotNetObjectReference<FileUploadProcessor>? _dotNetRef;
     private string _currentBatchId = string.Empty;
-    private string? _previousPolicyFingerprint;
+    private string? _previousLimitsFingerprint;
 
-    // State for the Policy Token
-    private string _policyToken = string.Empty;
+    // The server's limits for the current context. Null until fetched, or if the fetch failed.
+    private UploadLimits? _serverLimits;
 
     private record UploadResponse(
         [property: System.Text.Json.Serialization.JsonPropertyName("token")] string Token,
@@ -94,18 +94,23 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
     protected override async Task OnParametersSetAsync()
     {
-        var currentFingerprint = Options.GetPolicyFingerprint();
-        if (currentFingerprint == _previousPolicyFingerprint) return;
-        _previousPolicyFingerprint = currentFingerprint;
+        var currentFingerprint = Options.GetLimitsFingerprint();
+        if (currentFingerprint == _previousLimitsFingerprint) return;
+        _previousLimitsFingerprint = currentFingerprint;
 
         try
         {
-            _policyToken = await ClientService.GetPolicyTokenAsync(Options, _disposalCts.Token);
+            _serverLimits = await ClientService.GetEffectiveLimitsAsync(Options, _disposalCts.Token);
         }
         catch (OperationCanceledException) { /* Component disposed, safe to ignore */ }
         catch (Exception ex)
         {
-            await FireEventAsync(EventNotificationType.BatchFailed, null, $"Failed to get upload policy from server: {ex.Message}");
+            // Not fatal: the local options stand in for pre-filtering and the server enforces its
+            // own limits regardless, so a failed fetch costs accuracy in the UI, not safety.
+            _serverLimits = null;
+
+            if (Logger.IsEnabled(LogLevel.Warning))
+                Logger.LogWarning("Could not fetch upload limits, falling back to local options: {Message}", ex.Message);
         }
     }
 
@@ -159,6 +164,12 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     {
         Clear();
 
+        // The server's limits where we have them, the local options as a stand-in. These decide
+        // only how quickly a user is told: the server enforces its own values whatever happens
+        // here, so a failed fetch costs UI accuracy rather than safety.
+        long maxFileBytes = _serverLimits?.MaxFileBytes ?? Options.MaxSizeFileBytes;
+        IReadOnlyList<string> allowedMimeTypes = _serverLimits?.AllowedMimeTypes ?? Options.AllowedMimeTypes;
+
         // Two counters, deliberately separate:
         //  - domIndex is the file's position in the DOM <input> FileList. The JS worker reads
         //    input.files[Index], so it MUST advance for every file, accepted or skipped.
@@ -179,7 +190,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
 
             _transfers.Add(model);
 
-            if (file.Size > Options.MaxSizeFileBytes)
+            if (file.Size > maxFileBytes)
             {
                 model.Status = TransferStatus.Skipped;
                 model.StartTime = DateTime.UtcNow;
@@ -189,7 +200,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 continue;
             }
 
-            if (Options.AllowedMimeTypes.Count != 0 && !Options.AllowedMimeTypes.Contains(effectiveContentType))
+            if (allowedMimeTypes.Count != 0 && !allowedMimeTypes.Contains(effectiveContentType))
             {
                 model.Status = TransferStatus.Skipped;
                 model.StartTime = DateTime.UtcNow;
@@ -393,8 +404,6 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                             batchIdAtStart,
                             uploadToken,
                             FileUploadConstants.TOKEN_HEADER_NAME,
-                            _policyToken,
-                            FileUploadConstants.POLICY_HEADER_NAME,
                             Options.UploadContext,
                             new { headers = uploadHeaders, withCredentials = SendCredentials }
                             );

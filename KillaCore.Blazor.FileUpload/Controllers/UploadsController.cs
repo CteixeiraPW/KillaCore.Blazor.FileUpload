@@ -4,7 +4,6 @@ using KillaCore.Blazor.FileUpload.Client.Models;
 using KillaCore.Blazor.FileUpload.Filters;
 using KillaCore.Blazor.FileUpload.Models;
 using KillaCore.Blazor.FileUpload.Services;
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
@@ -19,19 +18,31 @@ public sealed class UploadsController(
     IFileUploadSecurityService securityService, // 1. Inject Security
     IBatchDuplicateTracker duplicateTracker, // 2. Inject the Batch Duplicate Tracker
     IFileFormatInspector inspector,    // 3. Inject the Magic Number Inspector
-    IDataProtectionProvider dpProvider, // 4. Data Protection Provider
-    IServiceProvider serviceProvider,   // 5. Inject Service Provider for Optional Hooks
+    IServiceProvider serviceProvider,   // 4. Inject Service Provider for Optional Hooks
     IOptions<FileUploadServerOptions> options,
     ILogger<UploadsController> logger
     ) : ControllerBase
 {
-    [HttpPost("policy")]
-    public IActionResult GeneratePolicy([FromBody] List<string>? allowedMimeTypes)
+    /// <summary>
+    /// Reports the limits in force for an upload context, so the component can pre-filter against
+    /// the server's real rules instead of the developer restating them client-side.
+    /// <para>
+    /// Read-only and unsigned, which is the point: this replaced an endpoint that signed whatever
+    /// rules the caller asked for. Nothing here is secret — the limits are observable from the
+    /// pipeline's behaviour anyway — and the server enforces them regardless of what the client
+    /// does with the answer.
+    /// </para>
+    /// </summary>
+    [HttpGet("policy/{uploadContext}")]
+    public IActionResult GetLimits(string uploadContext)
     {
-        var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY)
-            .ToTimeLimitedDataProtector();
-        string rulesPayload = allowedMimeTypes == null || allowedMimeTypes.Count == 0 ? "*" : string.Join(",", allowedMimeTypes);
-        return Ok(new { token = protector.Protect(rulesPayload, TimeSpan.FromMinutes(30)) });
+        var limits = options.Value.GetEffectiveLimits(uploadContext);
+
+        return Ok(new
+        {
+            maxFileBytes = limits.MaxFileBytes,
+            allowedMimeTypes = limits.AllowedMimeTypes
+        });
     }
 
     [HttpGet("token/{fileId}")]
@@ -88,36 +99,10 @@ public sealed class UploadsController(
     // locked everything else down, with no way for the consumer to close it. Apps that want
     // anonymous uploads ask for them via AddKillaCoreFileUploadServer(allowAnonymousUploads: true).
     [HttpPost("temp")]
-    [RequestSizeLimit(1024 * 1024 * 500)]
+    [ServiceFilter(typeof(RequestSizeGuardFilter))]
     public async Task<IActionResult> UploadTemp([FromForm] IFormFile file, CancellationToken ct)
     {
-        // --- STEP 1: EXTRACT & VALIDATE POLICY (The "What is Allowed?" check) ---
-
-        if (!Request.Headers.TryGetValue(FileUploadConstants.POLICY_HEADER_NAME, out var policyHeader))
-        {
-            return BadRequest("Missing upload policy.");
-        }
-
-        HashSet<string>? allowedMimeTypes = null;
-        try
-        {
-            var protector = dpProvider.CreateProtector(FileUploadConstants.DATA_PROTECTION_POLICY)
-                .ToTimeLimitedDataProtector();
-            string decryptedRules = protector.Unprotect(policyHeader.ToString());
-
-            if (decryptedRules != "*")
-            {
-                allowedMimeTypes = [.. decryptedRules
-                .Split(',', StringSplitOptions.RemoveEmptyEntries)
-                .Select(x => x.Trim().ToLowerInvariant())];
-            }
-        }
-        catch (System.Security.Cryptography.CryptographicException)
-        {
-            return BadRequest("Invalid security policy.");
-        }
-
-        // --- STEP 2: SECURITY & REPLAY CHECK ---
+        // --- STEP 1: SECURITY & REPLAY CHECK ---
 
         if (!Request.Headers.TryGetValue(FileUploadConstants.TOKEN_HEADER_NAME, out var tokenValues))
             return Unauthorized("Missing upload token.");
@@ -141,9 +126,28 @@ public sealed class UploadsController(
 
         duplicateTracker.RegisterBatch(clientBatchId, uploadContext);
 
+        // --- STEP 2: RESOLVE THE LIMITS IN FORCE (the "what is allowed?" check) ---
+
+        // Read from server configuration keyed by the upload context, never from the request.
+        // The caller may choose among profiles the developer defined; it cannot describe one.
+        var limits = options.Value.GetEffectiveLimits(uploadContext);
+
+        HashSet<string>? allowedMimeTypes = limits.AllowedMimeTypes.Count == 0
+            ? null // an empty list means any type
+            : new HashSet<string>(limits.AllowedMimeTypes, StringComparer.OrdinalIgnoreCase);
+
         // --- STEP 3: CONTENT INSPECTION (The "Is it Real?" check) ---
 
         if (file == null || file.Length == 0) return BadRequest("Empty file.");
+
+        // The authoritative size check. RequestSizeGuardFilter already turned away anything whose
+        // declared Content-Length was over the limit, but that header is advisory — absent on
+        // chunked requests — so the real length is checked here as well.
+        if (file.Length > limits.MaxFileBytes)
+        {
+            return StatusCode(StatusCodes.Status413PayloadTooLarge,
+                $"File exceeds the {limits.MaxFileBytes:N0} byte limit for this upload.");
+        }
 
         var userExtension = Path.GetExtension(file.FileName).ToLowerInvariant();
 

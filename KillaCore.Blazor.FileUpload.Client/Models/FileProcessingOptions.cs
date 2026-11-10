@@ -88,13 +88,8 @@ public sealed class FileProcessingOptions
 
 
     /// <summary>
-    /// Returns a fingerprint of the policy-relevant fields.
-    /// Used internally to detect when a policy token refresh is needed.
+    /// Fingerprint of the fields that decide WHICH limits apply — the server to ask, and the
+    /// context to ask about. Used internally to re-fetch only when the answer could have changed.
     /// </summary>
-    internal string GetPolicyFingerprint()
-    {
-        // Only include fields that affect the server-side policy token
-        var mimes = AllowedMimeTypes.Count == 0 ? "*" : string.Join(",", AllowedMimeTypes.Order());
-        return $"{_serverBaseUrl}|{mimes}";
-    }
+    internal string GetLimitsFingerprint() => $"{_serverBaseUrl}|{UploadContext}";
 }

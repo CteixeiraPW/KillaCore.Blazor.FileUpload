@@ -15,8 +15,12 @@ namespace KillaCore.Blazor.FileUpload.Client.Services;
 /// </summary>
 public interface IFileUploadClientService
 {
-    // Asks the server to encrypt the rules (e.g., AllowedMimeTypes)
-    Task<string> GetPolicyTokenAsync(FileProcessingOptions options, CancellationToken ct = default);
+    /// <summary>
+    /// Asks the server which limits apply to <c>options.UploadContext</c>, so the component can
+    /// pre-filter against the real rules. Returns null when the limits could not be retrieved —
+    /// the caller then falls back to its local values, since the server enforces regardless.
+    /// </summary>
+    Task<UploadLimits?> GetEffectiveLimitsAsync(FileProcessingOptions options, CancellationToken ct = default);
 
     // Asks the server for a specific file upload token
     Task<string> GetUploadTokenAsync(FileProcessingOptions options, string fileId, string userId, CancellationToken ct = default);
