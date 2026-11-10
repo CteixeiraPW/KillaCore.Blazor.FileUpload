@@ -26,11 +26,24 @@ public sealed class FileProcessingOptions
     }
 
     /// <summary>
+    /// Resolves one of the package's API routes against <see cref="ServerBaseUrl"/>.
+    /// <para>
+    /// Relative when same-origin, so the caller's <c>HttpClient.BaseAddress</c> (or the page's
+    /// own origin, for the XHR worker) applies and apps hosted under a sub-path keep working.
+    /// Absolute once a server base URL is set, so EVERY call in the pipeline goes to the same
+    /// host: the upload token and the policy are minted and verified by the same server, which
+    /// is the only way the signatures and Data Protection keys can line up.
+    /// </para>
+    /// </summary>
+    /// <param name="relativePath">Route beneath the API prefix, e.g. <c>"policy"</c>.</param>
+    public string ResolveApiUrl(string relativePath) => string.IsNullOrEmpty(_serverBaseUrl)
+        ? $"{FileUploadConstants.API_ROUTE_PREFIX}/{relativePath}"
+        : $"{_serverBaseUrl}/{FileUploadConstants.API_ROUTE_PREFIX}/{relativePath}";
+
+    /// <summary>
     /// The resolved upload endpoint. Relative when same-origin, absolute when cross-origin.
     /// </summary>
-    public string UploadEndpointUrl => string.IsNullOrEmpty(_serverBaseUrl)
-        ? $"{FileUploadConstants.API_ROUTE_PREFIX}/temp"
-        : $"{_serverBaseUrl}/{FileUploadConstants.API_ROUTE_PREFIX}/temp";
+    public string UploadEndpointUrl => ResolveApiUrl("temp");
 
 
     // Identifies which server hook should handle this upload. Defaults to "Default".

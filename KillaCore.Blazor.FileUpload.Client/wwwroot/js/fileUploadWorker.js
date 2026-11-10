@@ -55,6 +55,10 @@ export function cancelBatch(batchId) {
  * @param {string} tokenHeaderName - Name of the Auth Header
  * @param {string} policyToken - The Encrypted Allowed Extensions (X-Upload-Policy)
  * @param {string} policyHeaderName - Name of the Policy Header
+ * @param {string} uploadContext - Selects the server-side hook
+ * @param {{headers?: Object<string,string>, withCredentials?: boolean}} auth - Caller-supplied
+ *        authentication for the transfer. The pipeline's own token identifies the pipeline, not
+ *        the user, so bearer-token applications pass an Authorization header here.
  */
 export function uploadFile(
     dotNetHelper,
@@ -66,7 +70,8 @@ export function uploadFile(
     tokenHeaderName,
     policyToken,
     policyHeaderName,
-    uploadContext
+    uploadContext,
+    auth
 ) {
     return new Promise((resolve, reject) => {
         const input = document.querySelector(inputSelector);
@@ -90,6 +95,12 @@ export function uploadFile(
 
         xhr.open("POST", url, true);
 
+        // Must be set after open() and before send(). Only affects cross-origin requests —
+        // a same-origin XHR carries cookies regardless.
+        if (auth?.withCredentials) {
+            xhr.withCredentials = true;
+        }
+
         // --- CHANGED: Dynamic Header Names, Policy Injection, and Batch ID ---
         xhr.setRequestHeader(tokenHeaderName, uploadToken);
         xhr.setRequestHeader(policyHeaderName, policyToken);
@@ -98,6 +109,28 @@ export function uploadFile(
 
         if (uploadContext) {
             xhr.setRequestHeader("X-Upload-Context", uploadContext);
+        }
+
+        // Caller-supplied headers, typically Authorization. setRequestHeader APPENDS to an
+        // existing header rather than replacing it, so a caller who passed one of the pipeline's
+        // own names would silently corrupt it into "a, b" — hence the reserved-name guard.
+        if (auth?.headers) {
+            const reserved = new Set([
+                String(tokenHeaderName).toLowerCase(),
+                String(policyHeaderName).toLowerCase(),
+                "x-batch-id",
+                "x-upload-context",
+                "x-requested-with"
+            ]);
+
+            for (const [name, value] of Object.entries(auth.headers)) {
+                if (value === null || value === undefined) continue;
+                if (reserved.has(String(name).toLowerCase())) {
+                    console.warn(`[KillaCore] Ignoring reserved upload header '${name}'.`);
+                    continue;
+                }
+                xhr.setRequestHeader(name, value);
+            }
         }
 
         // --- Progress Reporting (Unchanged) ---

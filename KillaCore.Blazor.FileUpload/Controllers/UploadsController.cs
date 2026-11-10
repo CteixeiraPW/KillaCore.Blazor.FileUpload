@@ -133,8 +133,9 @@ public sealed class UploadsController(
         // Record the batch as legitimate now that a valid, unused token has been presented —
         // before content validation, so that a batch whose files ALL fail validation can still
         // report completion and let the app log or notify on it.
-        string uploadContext = Request.Headers["X-Upload-Context"].FirstOrDefault() ?? DEFAULT_UPLOAD_CONTEXT;
-        string clientBatchId = Request.Headers.TryGetValue("X-Batch-Id", out var bId)
+        string uploadContext = Request.Headers[FileUploadConstants.CONTEXT_HEADER_NAME].FirstOrDefault()
+            ?? DEFAULT_UPLOAD_CONTEXT;
+        string clientBatchId = Request.Headers.TryGetValue(FileUploadConstants.BATCH_ID_HEADER_NAME, out var bId)
             ? bId.ToString()
             : string.Empty;
 

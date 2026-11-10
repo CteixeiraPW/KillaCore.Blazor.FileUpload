@@ -249,6 +249,8 @@ You can now use the `FileUploadProcessor` in your **Client Project** (`.razor` f
 | `AllowedMimeTypes` | images, PDF, Office formats | Types the client accepts, also sent to the server as the upload policy. An empty list means any type. `text/html` is **not** included by default — see *Serving uploaded content* below. |
 | `MaxConcurrentUploads` | `5` | Throttle limit for how many parallel XHR network requests are executed. |
 | `VerifyLocalDuplicates` | `true` | Skip a file when an earlier file in the same selection has the same name and size. A client-side convenience only — the server rejects duplicate **content** by SHA-256 either way. |
+| `UploadContext` | `"Default"` | Selects which keyed `IFileUploadServerHooks` handles the batch. Must match the key used in `AddKeyedScoped`. |
+| `ServerBaseUrl` | `null` | Set only when the API is on a different origin — see *Cross-Origin Deployments*. Leave null for a same-project API. |
 
 ---
 
@@ -274,6 +276,43 @@ builder.Services.AddKillaCoreFileUploadServer(builder.Configuration, allowAnonym
 ```
 
 > **⚠️ Upgrading from an earlier version:** the upload action used to carry `[AllowAnonymous]`. Because that attribute is explicit authorization metadata, it *overrode* a fallback policy — an application that required an authenticated user everywhere still had its file-receiving endpoint reachable anonymously, and could not close it without replacing the controller. If your uploads were anonymous by design **and** your app has a fallback policy, set `allowAnonymousUploads: true` when you upgrade.
+
+### Authenticating uploads
+
+The pipeline makes two kinds of request, and they authenticate differently.
+
+**The JSON calls** — policy, token, batch completion — go through a typed `HttpClient`, so attach your application's usual handler:
+
+```csharp
+builder.Services.AddKillaCoreFileUploadClient()
+                .AddHttpMessageHandler<AuthorizationMessageHandler>();
+```
+
+**The file transfer** is an `XMLHttpRequest` driven by the component, so no message handler touches it. Its `X-Upload-Token` proves the request came through this pipeline; it does **not** establish who the user is. Supply that explicitly:
+
+```razor
+<FileUploadProcessor @ref="_processor"
+                     InputSelector="#myFileInput"
+                     Options="_options"
+                     GetUploadHeadersAsync="GetAuthHeadersAsync" />
+
+@code {
+    private async Task<IReadOnlyDictionary<string, string>> GetAuthHeadersAsync()
+    {
+        var token = await TokenProvider.GetAccessTokenAsync();
+        return new Dictionary<string, string> { ["Authorization"] = $"Bearer {token}" };
+    }
+}
+```
+
+`GetUploadHeadersAsync` is called **once per batch**, before the first file starts. A batch of large files can run for minutes, so a short-lived token may expire before the last file is sent — lower `MaxFiles` if that is a risk in your deployment. If it throws, the batch fails before anything is sent rather than producing one 401 per file. The package's own header names are reserved and ignored if returned.
+
+For **cookie** authentication set `SendCredentials="true"` instead. It is only needed cross-origin — a same-origin upload always carries cookies — and the API's CORS policy must then add `.AllowCredentials()`.
+
+| | Same-origin | Cross-origin |
+| :--- | :--- | :--- |
+| Cookies | automatic | `SendCredentials` + `AllowCredentials()` |
+| Bearer token | `GetUploadHeadersAsync` | `GetUploadHeadersAsync` |
 
 ### Serving uploaded content
 
@@ -301,6 +340,35 @@ By default, ASP.NET Kestrel and IIS block HTTP POST requests larger than **30MB*
 </security>
 ```
 * **Kestrel (`Program.cs`):** You must configure `MaxRequestBodySize` on the Kestrel server options.
+
+### Cross-Origin Deployments (standalone WASM + separate API)
+
+When the Blazor app and the upload API live on different origins, set `ServerBaseUrl` and nothing else. Every call in the pipeline — policy, token, upload, batch completion — is then addressed to that host:
+
+```csharp
+private readonly FileProcessingOptions _options = new()
+{
+    ServerBaseUrl = "https://api.example.com"
+};
+```
+
+Sending them all to one host is not a convenience, it is a requirement: the upload token and the encrypted policy are signed by one server and verified by the same one, so splitting them across two hosts fails with a signature or `CryptographicException` error.
+
+You must also allow the package's headers in the API's CORS policy, or the browser's preflight fails before anything is uploaded. The list is exposed so you don't have to keep it in sync by hand:
+
+```csharp
+builder.Services.AddCors(options => options.AddPolicy("KillaCoreUploads", policy => policy
+    .WithOrigins("https://app.example.com")
+    .WithHeaders(FileUploadConstants.CORS_REQUEST_HEADERS)
+    .WithMethods("GET", "POST")));
+
+// ...before app.MapControllers()
+app.UseCors("KillaCoreUploads");
+```
+
+Add `.AllowCredentials()` **only** if you also set `SendCredentials` on the component — by default nothing in the pipeline sends cookies, so it would grant a permission that is never used. The explicit `WithOrigins(...)` is required either way, because browsers reject credentialed requests against `AllowAnyOrigin()`. See *Authenticating uploads* above.
+
+> Leave `ServerBaseUrl` null when the app and the API are the same project. Routes then stay relative, which also keeps apps hosted under a sub-path such as `https://host/apps/myapp/` working.
 
 ### Web Farms & Docker Swarm
 This package relies on `IDataProtectionProvider` to encrypt upload policies. If you deploy your API across multiple servers or load balancers, you **must** configure a centralized Data Protection key ring (e.g., storing keys in Redis, Azure Blob Storage, or a shared network folder). If Server A encrypts the policy and the Load Balancer routes the file transfer to Server B, the upload will fail with a `CryptographicException` if Server B does not share the same decryption key.

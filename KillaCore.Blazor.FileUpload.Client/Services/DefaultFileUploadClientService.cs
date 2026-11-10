@@ -7,36 +7,45 @@ namespace KillaCore.Blazor.FileUpload.Client.Services;
 public class DefaultFileUploadClientService : IFileUploadClientService
 {
     private readonly HttpClient _httpClient;
-    private static readonly string _prefix = FileUploadConstants.API_ROUTE_PREFIX;
 
     public DefaultFileUploadClientService(HttpClient httpClient, NavigationManager navManager)
     {
         _httpClient = httpClient;
 
-        // Set BaseAddress here — this runs per-scope so NavigationManager is available
+        // Fallback only. Routes resolved from FileProcessingOptions.ServerBaseUrl come back
+        // absolute and override this; relative ones resolve against it, which keeps apps hosted
+        // under a sub-path working. Assigned conditionally so an explicit BaseAddress supplied
+        // through AddKillaCoreFileUploadClient(configureClient) still wins.
         _httpClient.BaseAddress ??= new Uri(navManager.BaseUri);
     }
 
     public async Task<string> GetPolicyTokenAsync(FileProcessingOptions options, CancellationToken ct)
     {
-        var response = await _httpClient.PostAsJsonAsync($"{_prefix}/policy", options.AllowedMimeTypes, ct);
+        var response = await _httpClient.PostAsJsonAsync(
+            options.ResolveApiUrl("policy"), options.AllowedMimeTypes, ct);
+
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken: ct);
         return result?.Token ?? string.Empty;
     }
 
-    public async Task<string> GetUploadTokenAsync(string fileId, string userId, CancellationToken ct)
+    public async Task<string> GetUploadTokenAsync(FileProcessingOptions options, string fileId, string userId, CancellationToken ct)
     {
-        var response = await _httpClient.GetAsync(
-            $"{_prefix}/token/{Uri.EscapeDataString(fileId)}?userId={Uri.EscapeDataString(userId)}", ct);
+        var route = options.ResolveApiUrl(
+            $"token/{Uri.EscapeDataString(fileId)}?userId={Uri.EscapeDataString(userId)}");
+
+        var response = await _httpClient.GetAsync(route, ct);
+
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken: ct);
         return result?.Token ?? string.Empty;
     }
 
-    public async Task NotifyBatchCompletedAsync(string batchId, IEnumerable<FileTransferData> files, CancellationToken ct = default)
+    public async Task NotifyBatchCompletedAsync(FileProcessingOptions options, string batchId, IEnumerable<FileTransferData> files, CancellationToken ct = default)
     {
-        var response = await _httpClient.PostAsJsonAsync($"{_prefix}/batch/{batchId}/complete", files, ct);
+        var route = options.ResolveApiUrl($"batch/{Uri.EscapeDataString(batchId)}/complete");
+
+        var response = await _httpClient.PostAsJsonAsync(route, files, ct);
         response.EnsureSuccessStatusCode();
     }
 

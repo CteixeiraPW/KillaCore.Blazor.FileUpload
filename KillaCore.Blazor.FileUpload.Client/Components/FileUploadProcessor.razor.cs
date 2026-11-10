@@ -27,6 +27,36 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     [Parameter, EditorRequired]
     public string InputSelector { get; set; } = default!;
 
+    /// <summary>
+    /// Supplies extra headers for the file transfer itself — typically <c>Authorization</c>.
+    /// <para>
+    /// The package's own <c>X-Upload-Token</c> proves the request came through this pipeline; it
+    /// says nothing about <i>who</i> the user is. Bearer-token applications need this hook,
+    /// because an XHR carries no <c>Authorization</c> header of its own.
+    /// </para>
+    /// <para>
+    /// Called ONCE per batch, before the first file starts. A batch of large files can run for
+    /// minutes, so a short-lived token may expire before the last file is sent; fetching per file
+    /// would instead cost one token request per upload. If your tokens are short relative to your
+    /// batches, lower <see cref="FileProcessingOptions.MaxFiles"/> rather than relying on a
+    /// mid-batch refresh. If this throws, the batch fails before anything is sent.
+    /// </para>
+    /// <para>
+    /// The package's own header names are reserved and are ignored if returned here.
+    /// </para>
+    /// </summary>
+    [Parameter] public Func<Task<IReadOnlyDictionary<string, string>>>? GetUploadHeadersAsync { get; set; }
+
+    /// <summary>
+    /// Sends cookies and HTTP authentication with the file transfer (<c>xhr.withCredentials</c>).
+    /// <para>
+    /// Only affects cross-origin uploads — a same-origin request always carries cookies. When set,
+    /// the API's CORS policy must use <c>AllowCredentials()</c> together with an explicit
+    /// <c>WithOrigins(...)</c>; the browser rejects credentials against <c>AllowAnyOrigin()</c>.
+    /// </para>
+    /// </summary>
+    [Parameter] public bool SendCredentials { get; set; }
+
     // --- 3. EVENT HOOKS ---
     [Parameter] public EventCallback<FileNotificationEvent> OnEvent { get; set; }
 
@@ -297,6 +327,26 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
     {
         var pendingModels = _transfers.Where(x => x.Status == TransferStatus.Pending).ToList();
 
+        // Fetched once for the whole batch. Without them a bearer-token API rejects every file,
+        // so a failure here fails the batch rather than producing N identical 401s.
+        IReadOnlyDictionary<string, string>? uploadHeaders = null;
+
+        if (GetUploadHeadersAsync is not null)
+        {
+            try
+            {
+                uploadHeaders = await GetUploadHeadersAsync();
+            }
+            catch (Exception ex)
+            {
+                foreach (var model in pendingModels)
+                    FailModel(model, $"Could not obtain upload headers: {ex.Message}");
+
+                await FireEventAsync(EventNotificationType.BatchFailed, null, ex.Message);
+                return;
+            }
+        }
+
         var parallelOptions = new ParallelOptions
         {
             MaxDegreeOfParallelism = Options.MaxConcurrentUploads,
@@ -323,7 +373,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                 {
                     UpdateStage(model, TransferStage.Uploading, "Uploading...");
 
-                    var uploadToken = await ClientService.GetUploadTokenAsync(model.Id, UserId, ct);
+                    var uploadToken = await ClientService.GetUploadTokenAsync(Options, model.Id, UserId, ct);
 
                     if (string.IsNullOrEmpty(uploadToken))
                         throw new Exception("Server rejected upload token request.");
@@ -345,7 +395,8 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                             FileUploadConstants.TOKEN_HEADER_NAME,
                             _policyToken,
                             FileUploadConstants.POLICY_HEADER_NAME,
-                            Options.UploadContext
+                            Options.UploadContext,
+                            new { headers = uploadHeaders, withCredentials = SendCredentials }
                             );
 
                         if (response != null && !string.IsNullOrEmpty(response.Token))
@@ -410,7 +461,7 @@ public partial class FileUploadProcessor : ComponentBase, IAsyncDisposable
                     // including a batch in which every single file failed.
                     var batchTransfers = _transfers.ToList();
 
-                    await ClientService.NotifyBatchCompletedAsync(_currentBatchId, batchTransfers, CancellationToken.None);
+                    await ClientService.NotifyBatchCompletedAsync(Options, _currentBatchId, batchTransfers, CancellationToken.None);
                 }
                 catch (Exception ex)
                 {

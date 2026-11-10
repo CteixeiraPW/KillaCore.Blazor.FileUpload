@@ -10,7 +10,17 @@ public static class ServiceCollectionExtensions
     /// BaseAddress is automatically resolved from NavigationManager.
     /// Optionally pass configureClient to override (e.g., custom base URL for cross-origin).
     /// </summary>
-    public static IServiceCollection AddKillaCoreFileUploadClient(
+    /// <returns>
+    /// The <see cref="IHttpClientBuilder"/> for the typed client, so the host application can
+    /// attach its own authentication to the policy, token and batch-completion calls:
+    /// <code>
+    /// builder.Services.AddKillaCoreFileUploadClient()
+    ///                 .AddHttpMessageHandler&lt;AuthorizationMessageHandler&gt;();
+    /// </code>
+    /// Note that this covers the JSON calls only. The file transfer itself is an XHR driven by
+    /// the component, so it authenticates through <c>GetUploadHeadersAsync</c> instead.
+    /// </returns>
+    public static IHttpClientBuilder AddKillaCoreFileUploadClient(
         this IServiceCollection services,
         Action<HttpClient>? configureClient = null)
     {
@@ -30,6 +40,6 @@ public static class ServiceCollectionExtensions
             options.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(3);
         });
 
-        return services;
+        return builder;
     }
 }
